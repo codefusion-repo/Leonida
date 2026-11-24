@@ -32,3 +32,6 @@ __pycache__/
 *.exp
 *.log
 .vs/
+
+# ---- private Project OS configuration and prompts ----
+.project-os/
