@@ -66,6 +66,17 @@ int main() {
         b=good; put(b,0x40c,0x15f8); reject(b); // IAT terminator outside copied section
         b=good; put(b,opt+112+12*8,0x1180); put(b,opt+116+12*8,16); reject(b);
         b=good; put(b,opt+112+12*8,0x1180); put(b,opt+116+12*8,24); check(rt::pe::plan_symbols(b).imports.size()==3);
+        // The declared IAT must itself be backed, aligned and disjoint from metadata.
+        b=good; put(b,opt+112+12*8,0x1100); put(b,opt+116+12*8,0x98); reject(b);
+        b=good; put(b,opt+112+12*8,0x1180); put(b,opt+116+12*8,0x488); reject(b);
+        b=good; put(b,opt+112+12*8,0x1180); put(b,opt+116+12*8,25); reject(b);
+        b=good; put(b,opt+112+12*8,0x1080); put(b,opt+116+12*8,0x118); reject(b);
+        // Reject exports into directories not consumed by the symbol parser, including padding.
+        b=good; put(b,opt+112+9*8,0x1500); put(b,opt+116+9*8,40); reject(b);
+        b=good; put(b,opt+120,0); put(b,opt+124,0);
+        put(b,opt+112+13*8,0); put(b,opt+116+13*8,0);
+        put(b,opt+112+12*8,0x1500); put(b,opt+116+12*8,8); reject(b);
+        put(b,0x250,0x1510); check(rt::pe::plan_symbols(b).exports.size()==2);
         b=good; put(b,0x300,0x1161,8); reject(b);
         b=good; put(b,opt+124,41); reject(b);
         b=good; put(b,0x460,0x1160,8); put(b,0x480,0x140001500ull,8);

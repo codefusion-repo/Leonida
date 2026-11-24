@@ -73,10 +73,13 @@ inline Symbols plan_symbols(std::span<const uint8_t> file) {
     SymbolReader reader(file);
     const auto& l = reader.layout();
     const auto relocations = plan_relocations(file);
+    const auto declared_iat = l.directories[12];
+    if (declared_iat.size)
+        reader.iat(declared_iat.rva, declared_iat.size, true);
     Symbols result;
     struct Range { uint32_t start, size; bool shared; };
     std::vector<Range> ranges;
-    auto record = [&](uint64_t rva, uint64_t size, bool shared = false, bool allow_reloc = false) {
+    auto record = [&](uint64_t rva, uint64_t size, bool shared = false, bool allow_reloc = false, bool is_iat = false) {
         if (!size) return;
         require(contains(l.image_size, rva, size) && ranges.size() < 4 * max_records + 4 * max_descriptors,
                 "symbol metadata range limit");
@@ -84,6 +87,8 @@ inline Symbols plan_symbols(std::span<const uint8_t> file) {
             const auto d = l.directories[index];
             require(!overlaps(rva, size, d.rva, d.size), "symbol metadata overlaps unrelated directory");
         }
+        if (!is_iat)
+            require(!overlaps(rva, size, declared_iat.rva, declared_iat.size), "symbol metadata overlaps declared IAT");
         if (!allow_reloc)
             require(!relocations.touches(static_cast<uint32_t>(rva), static_cast<uint32_t>(size)), "relocation overlaps symbol metadata");
         ranges.push_back({static_cast<uint32_t>(rva), static_cast<uint32_t>(size), shared});
@@ -165,8 +170,8 @@ inline Symbols plan_symbols(std::span<const uint8_t> file) {
                 const auto length = pos + 8;
                 reader.iat(iat, length, delay);
                 if (lookup != iat) record(lookup, length);
-                record(iat, pos, false, delay);
-                record(iat + pos, 8);
+                record(iat, pos, false, delay, true);
+                record(iat + pos, 8, false, false, true);
                 break;
             }
             require(slots.insert(static_cast<uint32_t>(slot)).second, "overlapping IAT slots");
@@ -242,6 +247,13 @@ inline Symbols plan_symbols(std::span<const uint8_t> file) {
         distinct.push_back(range);
     }
     for (const auto& e : result.exports) {
+        // Export targets may be code or data, but not PE directory metadata.
+        // The security directory uses a file offset and is excluded.
+        for (size_t index = 0; index < l.directories.size(); ++index) {
+            if (index == 4) continue;
+            const auto d = l.directories[index];
+            require(!overlaps(e.rva, 1, d.rva, d.size), "export targets PE directory");
+        }
         const auto it = std::upper_bound(distinct.begin(), distinct.end(), e.rva,
             [](uint32_t rva, const Range& range) { return rva < range.start; });
         if (it != distinct.begin()) {
