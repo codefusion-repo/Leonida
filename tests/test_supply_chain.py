@@ -46,6 +46,10 @@ class PolicyTests(unittest.TestCase):
                         source.replace("needs: [check, verify_evidence]", "needs: [check]"),
                         source.replace("attestations: write", "attestations: read"),
                         source.replace("subject-path:", "subject-digest:"),
+                        source.replace("merge-multiple: true", "merge-multiple: false"),
+                        source.replace("--expected-digest", "--unexpected-digest"),
+                        source.replace("      manifest_sha256:", "      wrong_digest:"),
+                        source.replace("    needs: check\n", "    needs: []\n"),
                         source.replace("    outputs:\n", "    permissions:\n      id-token: write\n    outputs:\n")):
             with self.assertRaises(ValueError):
                 p["validate_workflow"](changed)

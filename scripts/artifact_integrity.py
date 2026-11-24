@@ -74,12 +74,34 @@ def context(sha, env, signing=False):
         require(sha == event_sha == workflow_sha, "push SHA mismatch")
     else:
         require(re.fullmatch(r"refs/pull/[1-9][0-9]*/merge", ref), "invalid PR ref")
+        require(workflow_sha == event_sha, "PR workflow SHA mismatch")
     if signing:
         require(event == "push" and ref == "refs/heads/main" and
                 env.get("GITHUB_REF_PROTECTED") == "true", "signing requires protected main push")
     return {"repository": REPO, "candidate": sha, "event": event, "ref": ref,
             "eventSha": event_sha, "workflowRef": workflow, "workflowSha": workflow_sha,
             "runId": run_id, "runAttempt": attempt}
+
+
+def validate_outputs(artifact_id, digest):
+    require(isinstance(artifact_id, str) and re.fullmatch(r"[1-9][0-9]{0,19}", artifact_id),
+            "expected exactly one numeric artifact ID")
+    require(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest),
+            "invalid producer manifest digest")
+
+
+def validate_event(identity, event):
+    if identity["event"] == "pull_request":
+        pr = event["pull_request"]
+        require(pr["head"]["sha"] == identity["candidate"] and
+                pr["head"]["repo"]["full_name"] == REPO and
+                pr["base"]["repo"]["full_name"] == REPO and
+                str(pr["number"]) == identity["ref"].split("/")[2],
+                "PR payload identity mismatch")
+    else:
+        require(event["after"] == identity["candidate"] and event["ref"] == identity["ref"] and
+                event["repository"]["full_name"] == REPO and event.get("deleted") is False,
+                "push payload identity mismatch")
 
 
 def snapshot(directory, identity, with_manifest):
@@ -95,7 +117,8 @@ def snapshot(directory, identity, with_manifest):
     require(audit.get("candidate") == identity["candidate"] and audit.get("submodule") == SUB and
             audit.get("reviewedLocks") is True and audit.get("lockedRestore") == "passed" and
             audit.get("advisoryReports") == "passed" and
-            audit.get("source") == "https://api.nuget.org/v3/index.json",
+            audit.get("source") == "https://api.nuget.org/v3/index.json" and
+            audit.get("mode") == "all" and audit.get("level") == "low",
             "audit identity or gates mismatch")
     bom = data["rpf9dump.cdx.json"]
     require(bom.get("bomFormat") == "CycloneDX" and bom.get("specVersion") == "1.5" and
@@ -113,29 +136,59 @@ def create(directory, identity):
         stream.write("\n")
 
 
-def verify(directory, identity):
+def verify(directory, identity, expected_digest=None):
     expected = snapshot(directory, identity, True)
     raw = safe_read(directory / MANIFEST)
     actual = parse(raw)
-    require(actual == expected, "manifest identity, file size or digest mismatch")
-    return sha256(raw)
+    # Canonical serialization also rejects JSON numeric/bool type aliases
+    # (Python considers True == 1) in security-critical metadata.
+    require(json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True),
+            "manifest identity, file size or digest mismatch")
+    digest = sha256(raw)
+    if expected_digest is not None:
+        require(re.fullmatch(r"[a-f0-9]{64}", expected_digest) and digest == expected_digest,
+                "producer manifest digest mismatch")
+    return digest
+
+
+def verify_semantics(directory, root):
+    # Use the already reviewed S4.1 parser for the actual advisory reports.
+    import runpy
+    policy = runpy.run_path(str(root / "scripts/supply_chain.py"))
+    for name, project in (("rpf9dump.advisories.json", "rpf9dump.csproj"),
+                          ("RpfPreview.Core.advisories.json", "RpfPreview.Core.csproj")):
+        policy["validate_report"](parse(safe_read(directory / name)), project)
+    for name in ("rpf9dump.lock.json", "rpf9-core.lock.json"):
+        require(parse(safe_read(directory / name)) ==
+                parse(safe_read(root / "dependency-locks" / name)),
+                "artifact lock differs from reviewed checkout")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("create", "verify"))
-    parser.add_argument("--directory", type=Path, required=True)
-    parser.add_argument("--sha", required=True)
+    parser.add_argument("mode", choices=("create", "verify", "validate-outputs"))
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--sha")
+    parser.add_argument("--expected-digest")
     parser.add_argument("--signing", action="store_true")
     args = parser.parse_args()
-    require(not args.signing or args.mode == "verify", "signing requires verify")
+    if args.mode == "validate-outputs":
+        validate_outputs(os.environ.get("ARTIFACT_ID"), os.environ.get("MANIFEST_SHA256"))
+        print("Producer outputs PASS: single artifact ID and SHA-256")
+        return
+    require(args.directory is not None and args.sha is not None, "directory and SHA required")
+    require(not args.signing or (args.mode == "verify" and args.expected_digest),
+            "signing requires verification against producer digest")
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                      text=True, timeout=30).strip()
     require(actual == args.sha, "checkout mismatch")
     identity = context(args.sha, os.environ, args.signing)
+    with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
+        validate_event(identity, json.load(stream))
+    verify_semantics(args.directory, ROOT)
     if args.mode == "create":
         create(args.directory, identity)
-    digest = verify(args.directory, identity)
+    digest = verify(args.directory, identity, args.expected_digest)
     print("Artifact integrity PASS: six JSON files, candidate/workflow/run identity, manifest SHA-256", digest)
 
 

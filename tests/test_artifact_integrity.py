@@ -22,7 +22,8 @@ class IntegrityTests(unittest.TestCase):
             self.write(name, {})
         self.write("audit.json", {"candidate": SHA, "submodule": p["SUB"], "reviewedLocks": True,
                                   "lockedRestore": "passed", "advisoryReports": "passed",
-                                  "source": "https://api.nuget.org/v3/index.json"})
+                                  "source": "https://api.nuget.org/v3/index.json",
+                                  "mode": "all", "level": "low"})
         self.write("rpf9dump.cdx.json", {"bomFormat": "CycloneDX", "specVersion": "1.5",
                                          "metadata": {"component": {"version": SHA}}})
 
@@ -92,6 +93,52 @@ class IntegrityTests(unittest.TestCase):
             path.symlink_to(self.root / "rpf9-core.lock.json")
         except OSError:
             self.skipTest("symlink creation unavailable on runner")
+        self.reject()
+
+    def test_producer_digest(self):
+        self.seal()
+        original = p["verify"](self.root, self.identity)
+        p["verify"](self.root, self.identity, original)
+        # An attacker can replace both an unsigned file and its manifest.
+        (self.root / "manifest.json").unlink()
+        self.write("rpf9dump.lock.json", {"changed": True})
+        self.seal()
+        p["verify"](self.root, self.identity)
+        with self.assertRaises(ValueError):
+            p["verify"](self.root, self.identity, original)
+
+    def test_outputs(self):
+        p["validate_outputs"]("123", "a" * 64)
+        for artifact_id, digest in (("", "a" * 64), ("123,456", "a" * 64),
+                                    ("../123", "a" * 64), ("123", ""),
+                                    ("123", "A" * 64), (None, "a" * 64)):
+            with self.assertRaises(ValueError):
+                p["validate_outputs"](artifact_id, digest)
+
+    def test_event_payload(self):
+        push = {"after": SHA, "ref": "refs/heads/main", "repository": {"full_name": p["REPO"]},
+                "deleted": False}
+        p["validate_event"](self.identity, push)
+        with self.assertRaises(ValueError):
+            p["validate_event"](self.identity, dict(push, after="b" * 40))
+        pr = dict(ENV, GITHUB_EVENT_NAME="pull_request", GITHUB_REF="refs/pull/12/merge",
+                  GITHUB_WORKFLOW_REF=p["WORKFLOW"] + "refs/pull/12/merge",
+                  GITHUB_SHA="b" * 40, GITHUB_WORKFLOW_SHA="b" * 40)
+        identity = p["context"](SHA, pr)
+        event = {"pull_request": {"number": 12, "head": {"sha": SHA, "repo": {"full_name": p["REPO"]}},
+                                  "base": {"repo": {"full_name": p["REPO"]}}}}
+        p["validate_event"](identity, event)
+        event["pull_request"]["head"]["repo"]["full_name"] = "other/repo"
+        with self.assertRaises(ValueError):
+            p["validate_event"](identity, event)
+        with self.assertRaises(ValueError):
+            p["context"](SHA, dict(pr, GITHUB_WORKFLOW_SHA="c" * 40))
+
+    def test_manifest_type(self):
+        self.seal()
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        manifest["schemaVersion"] = True
+        self.write("manifest.json", manifest)
         self.reject()
 
     def test_signing_context(self):
