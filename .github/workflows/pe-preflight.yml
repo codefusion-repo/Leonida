@@ -33,6 +33,8 @@ jobs:
           ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/pe_validation_test"
           clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer runtime/test/pe_relocation_test.cpp -o "$RUNNER_TEMP/pe_relocation_test"
           ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/pe_relocation_test"
+          clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer runtime/test/pe_symbols_test.cpp -o "$RUNNER_TEMP/pe_symbols_test"
+          ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/pe_symbols_test"
   windows:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
@@ -51,7 +53,7 @@ jobs:
           if ((git rev-parse HEAD) -ne $env:CANDIDATE_SHA) { throw "Candidate SHA mismatch" }
           cmake -S runtime -B "$env:RUNNER_TEMP/pe-build" -A x64 -DLEONIDA_PE_VALIDATION_TESTS=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build "$env:RUNNER_TEMP/pe-build" --config Release --target gta6rt pe_validation_test pe_relocation_test
+          cmake --build "$env:RUNNER_TEMP/pe-build" --config Release --target gta6rt pe_validation_test pe_relocation_test pe_symbols_test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir "$env:RUNNER_TEMP/pe-build" -C Release --output-on-failure
           exit $LASTEXITCODE
