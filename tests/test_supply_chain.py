@@ -41,6 +41,14 @@ class PolicyTests(unittest.TestCase):
         clean = {"version": 1, "parameters": "--vulnerable --include-transitive", "sources": [source], "projects": [
             {"path": "rpf9dump.csproj", "frameworks": []}]}
         p["validate_report"](clean, "rpf9dump.csproj")
+        omitted = copy.deepcopy(clean)
+        del omitted["projects"][0]["frameworks"]
+        p["validate_report"](omitted, "rpf9dump.csproj")
+        for value in (None, {}, "invalid"):
+            malformed = copy.deepcopy(clean)
+            malformed["projects"][0]["frameworks"] = value
+            with self.assertRaises(ValueError):
+                p["validate_report"](malformed, "rpf9dump.csproj")
         for key in ("version", "sources", "projects", "parameters"):
             bad = copy.deepcopy(clean)
             del bad[key]
@@ -60,6 +68,21 @@ class PolicyTests(unittest.TestCase):
         assets = {"version": 3, "targets": {"net8.0": target},
                   "libraries": {k: {"type": v["type"], "sha512": digest} for k, v in target.items()},
                   "project": {"restore": {"sources": {source: {}}}, "frameworks": {"net8.0": {}}}}
+        p["verify_restore_sources"](assets)
+        for key, value in (("sources", {source: {}, "https://example.invalid": {}}),
+                           ("fallbackFolders", ["C:/untrusted"])):
+            altered = copy.deepcopy(assets)
+            altered["project"]["restore"][key] = value
+            with self.assertRaises(ValueError):
+                p["verify_restore_sources"](altered)
+        inventory = {"version": 1, "parameters": "--include-transitive", "projects": [
+            {"path": "rpf9dump.csproj", "frameworks": [{"framework": "net8.0", "transitivePackages": [
+                {"id": "BCnEncoder.Net", "resolvedVersion": "2.3.0"},
+                {"id": "Synthetic", "resolvedVersion": "1.0.0"}]}]}]}
+        p["validate_inventory"](inventory, assets, "rpf9dump.csproj")
+        inventory["projects"][0]["frameworks"][0]["transitivePackages"].pop()
+        with self.assertRaises(ValueError):
+            p["validate_inventory"](inventory, assets, "rpf9dump.csproj")
         bom = p["sbom"](assets, "1" * 40)
         lock = {"version": 1, "dependencies": {"net8.0": {
             "RpfPreview.Core": {"type": "Project", "dependencies": {"BCnEncoder.Net": "2.3.0"}},

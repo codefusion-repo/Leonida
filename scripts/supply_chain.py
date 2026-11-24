@@ -139,7 +139,9 @@ def validate_report(report, project_name):
     require(isinstance(projects, list) and len(projects) == 1, "missing audit project")
     require(str(projects[0].get("path", "")).replace("\\", "/").split("/")[-1] == project_name,
             "wrong audit project")
-    require(isinstance(projects[0].get("frameworks"), list), "missing framework report")
+    # NuGet's vulnerability-only JSON omits frameworks when none contain findings.
+    # The unfiltered inventory is separately checked against the actual assets.
+    require(isinstance(projects[0].get("frameworks", []), list), "invalid framework report")
     parameters = report.get("parameters", "")
     require(isinstance(parameters, str) and "vulnerable" in parameters and
             "include-transitive" in parameters, "wrong advisory query mode")
@@ -157,6 +159,39 @@ def validate_report(report, project_name):
     walk(report)
 
 
+def validate_inventory(report, assets, project_name):
+    require(report.get("version") == 1 and "include-transitive" in report.get("parameters", ""),
+            "unexpected inventory report")
+    require(not report.get("problems"), "inventory query reported problems")
+    projects = report["projects"]
+    require(len(projects) == 1 and
+            projects[0]["path"].replace("\\", "/").split("/")[-1] == project_name,
+            "wrong inventory project")
+    require(not projects[0].get("problems"), "project inventory problems")
+    frameworks = projects[0]["frameworks"]
+    require(len(frameworks) == 1 and frameworks[0]["framework"] == "net8.0",
+            "unexpected inventory framework")
+    require(not frameworks[0].get("problems"), "framework inventory problems")
+    listed = {}
+    for category in ("topLevelPackages", "transitivePackages"):
+        for item in frameworks[0].get(category, []):
+            name = item["id"].lower()
+            require(name not in listed, "duplicate inventory package")
+            listed[name] = item["resolvedVersion"]
+    expected = {key.split("/")[0].lower(): key.split("/")[1]
+                for key, value in assets["targets"]["net8.0"].items() if value["type"] == "package"}
+    require(listed == expected, "inventory does not cover resolved package graph")
+
+
+def verify_restore_sources(assets):
+    restore = assets["project"]["restore"]
+    sources = restore["sources"]
+    require(isinstance(sources, dict) and set(sources) == {SOURCE},
+            "unexpected restore sources: " + repr(list(sources)))
+    require(not restore.get("fallbackFolders"), "unexpected fallback package folders")
+    require(not assets.get("logs"), "restore graph contains diagnostic findings")
+
+
 def sbom(assets, sha):
     require(assets.get("version") == 3, "unexpected assets format")
     require(not assets.get("logs"), "restore graph contains diagnostic findings")
@@ -164,7 +199,7 @@ def sbom(assets, sha):
     target = assets["targets"]["net8.0"]
     libraries = assets["libraries"]
     require(set(target) == set(libraries) and target, "incomplete restore graph")
-    require(set(assets["project"]["restore"]["sources"]) == {SOURCE}, "unexpected restore sources")
+    verify_restore_sources(assets)
     refs, components, edges = {}, [], {}
     root_ref = "leonida:rpf9dump:" + sha
     root_deps = []
@@ -306,6 +341,9 @@ def committed_locks():
 
 def restore(locked):
     command = ["dotnet", "restore", PROJECT, "--configfile", "NuGet.Config",
+               "--source", SOURCE, "-p:RestoreAdditionalProjectSources=",
+               "-p:RestoreFallbackFolders=", "-p:RestoreAdditionalProjectFallbackFolders=",
+               "-p:DisableImplicitNuGetFallbackFolder=true",
                "--force", "--no-cache", "--use-lock-file", "-p:NuGetAudit=true",
                "-p:NuGetAuditMode=all", "-p:NuGetAuditLevel=low", "-p:TreatWarningsAsErrors=true",
                "-p:NoWarn=", "-p:WarningsNotAsErrors=", "-p:NuGetAuditSuppress=",
@@ -353,11 +391,15 @@ def audit(sha, output):
         assets = read_assets(project)
         emit_evidence(raw / name, "UNREVIEWED_LOCKFILE", generated[name])
         graph = {"version": assets["version"], "targets": assets["targets"],
+                 "restoreSources": assets["project"]["restore"]["sources"],
+                 "fallbackFolders": assets["project"]["restore"].get("fallbackFolders", []),
                  "libraries": {k: {field: v[field] for field in ("type", "sha512") if field in v}
                                for k, v in assets["libraries"].items()}}
         emit_evidence(raw / (name + ".graph.json"), "UNREVIEWED_GRAPH", graph)
     for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
-        validate_lock(generated[name], read_assets(project))
+        assets = read_assets(project)
+        verify_restore_sources(assets)
+        validate_lock(generated[name], assets)
     if reviewed:
         require(reviewed == generated, "reviewed lock changed")
     first = sbom(read_assets(PROJECT), sha)
@@ -370,19 +412,30 @@ def audit(sha, output):
     require(generated == read_locks(), "locked restore modified lockfiles")
     print("Locked NuGet restore PASS: fresh package and HTTP caches", flush=True)
     for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
-        validate_lock(generated[name], read_assets(project))
+        assets = read_assets(project)
+        verify_restore_sources(assets)
+        validate_lock(generated[name], assets)
     bom = sbom(read_assets(PROJECT), sha)
     require(first["components"] == bom["components"] and first["dependencies"] == bom["dependencies"],
             "locked restore changed resolved graph")
+    reports = {}
     for project in (PROJECT, CORE):
+        inventory = run("dotnet", "list", project, "package", "--include-transitive",
+                        "--format", "json", "--output-version", "1")
+        validate_inventory(json.loads(inventory), read_assets(project), Path(project).name)
         result = subprocess.run(["dotnet", "list", project, "package", "--vulnerable",
                                  "--include-transitive", "--config", "NuGet.Config",
                                  "--format", "json", "--output-version", "1"],
                                 cwd=ROOT, capture_output=True, encoding="utf-8", timeout=180)
         require(result.returncode == 0 and not result.stderr.strip(), "NuGet advisory query failed")
         report = json.loads(result.stdout)
+        # Retain actual JSON even if schema or advisory findings block approval.
+        emit_evidence(raw / (Path(project).stem + ".advisories.json"), "UNREVIEWED_ADVISORY", report)
         validate_report(report, Path(project).name)
+        reports[Path(project).stem] = report
     output.mkdir(parents=True, exist_ok=False)
+    for name, report in reports.items():
+        emit_evidence(output / (name + ".advisories.json"), "ADVISORY", report)
     emit_evidence(output / "rpf9dump.cdx.json", "SBOM", bom)
     for name, value in generated.items():
         emit_evidence(output / name, "LOCKFILE", value)
