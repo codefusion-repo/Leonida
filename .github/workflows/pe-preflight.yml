@@ -24,6 +24,8 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           python3 -I -B runtime/test/memory_policy_test.py
+          python3 -I -B tests/test_binary_security.py -v
+          python3 -I -B tests/test_native_link_evidence.py -v
           clang++ --version
           clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer runtime/test/pe_validation_test.cpp -o "$RUNNER_TEMP/pe_validation_test"
           ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/pe_validation_test"
@@ -58,6 +60,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build "$env:RUNNER_TEMP/pe-build" --config Release --target gta6rt pe_validation_test pe_relocation_test pe_symbols_test dll_policy_test loader_limits_test loader_lifecycle_test shim_registry_test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -B tests/test_binary_security.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -B scripts/binary_security.py --binary "$env:RUNNER_TEMP/pe-build/Release/gta6rt.exe" --toolchain "$env:RUNNER_TEMP/pe-build/runtime-toolchain-Release.txt" --build cmake --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/native-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/inspect_native_pe.ps1 -Binary "$env:RUNNER_TEMP/pe-build/Release/gta6rt.exe" -Build cmake -Evidence "$env:RUNNER_TEMP/native-evidence"
           ctest --test-dir "$env:RUNNER_TEMP/pe-build" -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B runtime/test/loader_lifecycle_test.py "$env:RUNNER_TEMP/pe-build/Release/loader_lifecycle_test.exe"
@@ -67,7 +74,14 @@ jobs:
       - name: Build direct MSVC and verify diagnostic integration
         shell: pwsh
         run: |
-          & ./scripts/build_runtime.ps1 -DirectMsvc
+          & ./scripts/build_runtime.ps1 -DirectMsvc -LinkEvidence
+          python -I -B scripts/binary_security.py --binary runtime/build/gta6rt.exe --toolchain runtime/build/runtime-toolchain-direct.txt --build direct --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/native-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/inspect_native_pe.ps1 -Binary runtime/build/gta6rt.exe -Build direct -Evidence "$env:RUNNER_TEMP/native-evidence"
+          python -I -B tests/test_native_link_evidence.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -B scripts/native_link_evidence.py --binary runtime/build/gta6rt.exe --stdout runtime/build/runtime-link.stdout.txt --stderr runtime/build/runtime-link.stderr.txt --map runtime/build/runtime-link.map --evidence "$env:RUNNER_TEMP/native-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B runtime/test/dll_dry_run_test.py runtime/build/gta6rt.exe
           exit $LASTEXITCODE
       - name: Verify actual PowerShell first-look wrapper
@@ -75,3 +89,20 @@ jobs:
         run: |
           python -I -B runtime/test/dll_wrapper_test.py
           exit $LASTEXITCODE
+
+      - name: Retain approved native build evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-pe-evidence-${{ env.CANDIDATE_SHA }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-evidence/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain unapproved native diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-pe-UNAPPROVED-${{ env.CANDIDATE_SHA }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-evidence/*.json
+          if-no-files-found: ignore
+          retention-days: 7

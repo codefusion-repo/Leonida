@@ -40,3 +40,7 @@ No gate is passed by this document. No release, merge, settings change or host e
 ## Evidence and continuity
 
 Use GitHub as source of truth: link the outcome PR, candidate SHA, actual diff, checks, review findings and remaining blockers. Preserve upstream contribution rules and avoid unrelated changes. Use the Project OS browser adapter for remote work; local setup, effective ignore tests and VM execution must be verified separately when available.
+
+## ZAC-01 — zero additional spend objective
+
+Use existing standard GitHub-hosted public-repository runners and available Student Developer Pack benefits. Do not enable paid runners, services, storage upgrades or change billing/settings. Reuse the Windows preflight build for S5.1 static evidence, keep required checks and all existing tests; no new build job. Batch related changes in a single commit where possible, inspect existing run evidence before rerunning, and retain approved JSON evidence 30 days and unapproved diagnostics 7 days. No binary or game-data uploads. Actual billing is not established by workflow configuration. If a new cost is required, stop and obtain authorization. See [S5.1 native binary policy](binary-security.md). Host execution remains HOLD.
