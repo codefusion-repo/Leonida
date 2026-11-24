@@ -37,21 +37,44 @@ class SwizzleParserTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     swizzle._parse_mask(expression, swizzle._symbols())
 
+    def fixture(self):
+        return "\n".join(
+            f"const UINT_64 GFX10_SW_PATTERN_{name}[][{width}] =\n"
+            "{\n{" + ", ".join(["X0^Y1"] + ["0"] * (width - 1)) + ", }, // 0\n};"
+            for name, width in swizzle.NIBBLE_WIDTHS.items()
+        ) + "\nconst ADDR_SW_PATINFO GFX10_SW_TEST_PATINFO[] =\n{\n{1, 0, 0, 0, 0, }, // test\n};\n"
+
     def test_load_synthetic_header(self):
-        names = ("NIBBLE01", "NIBBLE2", "NIBBLE3", "NIBBLE4")
-        header = "\n".join(
-            f"const UINT_64 GFX10_SW_PATTERN_{name}[][2] =\n"
-            "{\n{X0^Y1, 0, },\n};" for name in names)
         with tempfile.TemporaryDirectory() as folder:
             file = Path(folder) / "fixture.h"
-            file.write_text(header, encoding="utf-8")
+            file.write_bytes(self.fixture().replace("\n", "\r\n").encode("utf-8"))
             nibbles, tables = swizzle.load(file)
-            self.assertEqual(nibbles, {name: [[1 ^ (1 << 17), 0]] for name in names})
-            self.assertEqual(tables, {})
-            file.write_text(header.replace("X0^Y1", "len([])"), encoding="utf-8")
-            with self.assertRaises(ValueError):
+            self.assertEqual(nibbles, {name: [[1 ^ (1 << 17)] + [0] * (width - 1)]
+                                       for name, width in swizzle.NIBBLE_WIDTHS.items()})
+            self.assertEqual(tables, {"GFX10_SW_TEST_PATINFO": [(1, 0, 0, 0, 0, "test")]})
+            self.assertEqual(swizzle.equation(nibbles, tables["GFX10_SW_TEST_PATINFO"][0], 16)[0], (1, 2))
+
+    def test_reject_malformed_headers(self):
+        header = self.fixture()
+        malformed = ("", header.replace("X0^Y1", "len([])"),
+                     header.replace("X0^Y1, 0", "X0^Y1,, 0", 1),
+                     header.replace("X0^Y1, 0", "X0^Y1", 1),
+                     header.replace("NIBBLE01[][8]", "NIBBLE01[][7]"),
+                     header + header,
+                     header.replace("{1, 0, 0, 0, 0, }", "{1, 1, 0, 0, 0, }"),
+                     header.replace("{1, 0, 0, 0, 0, }", "invalid row"),
+                     header.split("const ADDR_SW_PATINFO")[0])
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / "fixture.h"
+            for index, text in enumerate(malformed):
+                with self.subTest(case=index):
+                    file.write_text(text, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        swizzle.load(file)
+            file.write_bytes(b"\xff")
+            with self.assertRaises(UnicodeDecodeError):
                 swizzle.load(file)
-            file.write_text("", encoding="utf-8")
+            file.write_bytes(b" " * (swizzle.MAX_HEADER_BYTES + 1))
             with self.assertRaises(ValueError):
                 swizzle.load(file)
 
