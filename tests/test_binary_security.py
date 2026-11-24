@@ -24,7 +24,7 @@ def fixture():
     put("II",o+56,0x4000,0x200)
     put("H",o+70,0x4160)
     put("I",o+108,16)
-    for index,rva,size in ((1,0x2100,40),(5,0x3000,12),(10,0x2200,148)):
+    for index,rva,size in ((1,0x2100,40),(5,0x3000,20),(10,0x2200,148),(12,0x2180,16)):
         put("II",o+112+index*8,rva,size)
     for i,(name,vs,va,rs,rp,flags) in enumerate((
         (b".text",0x200,0x1000,0x200,0x200,0x60000020),
@@ -41,8 +41,9 @@ def fixture():
     b[0x5a2:0x5ae]=b"VirtualFree\0"
     put("I",0x600,148)
     put("QQQQI",0x670,0x140002300,0x140002308,0x140002320,1,0x500)
+    put("QQ",0x700,0x140001000,0x140001010)
     put("I",0x720,0x1000)
-    put("IIHH",0xa00,0x2000,12,0xa270,0xa278)
+    put("IIHHHHHH",0xa00,0x2000,20,0xa270,0xa278,0xa280,0xa300,0xa308,0)
     return b
 
 
@@ -90,6 +91,12 @@ class BinaryPolicyTests(unittest.TestCase):
         self.bad("Q",0x680,0xffffffffffffffff)
         self.bad("I",0x720,0x2000)
         self.bad("Q",0x688,262145)
+        self.bad("I",0x98+240+40+36,0xc0000040)
+        self.bad("Q",0x678,0x140002300)
+        self.bad("Q",0x700,0)
+        self.bad("Q",0x708,0x140002000)
+        self.bad("I",0x690,0x10000500)
+        self.bad("H",0xa0c,0)
 
     def test_imports(self):
         b=fixture()
@@ -103,12 +110,21 @@ class BinaryPolicyTests(unittest.TestCase):
         self.bad("II",0x98+112+13*8,0x2100,40)
         self.bad("I",0x514,1)
         self.bad("Q",0x580,0)
+        self.bad("II",0x98+112+12*8,0,0)
+        self.bad("II",0x98+112+12*8,0x2188,16)
+        self.bad("I",0x510,0x2160)
+        b=fixture()
+        struct.pack_into("<QQ",b,0x560,0x8000000000000001,0)
+        struct.pack_into("<QQ",b,0x580,0x8000000000000001,0)
+        with self.assertRaisesRegex(ValueError,"ordinal"): analyze(b)
 
     def test_reloc(self):
         self.bad("I",0x98+112+5*8+4,0)
         self.bad("I",0xa04,0xffffffff)
         self.bad("H",0xa08,0x3270)
         self.bad("HH",0xa08,0,0)
+        self.bad("H",0xa0a,0xa270)
+        self.bad("H",0xa0a,0xa274)
 
 
 if __name__ == "__main__":

@@ -109,7 +109,7 @@ class PE:
                         all(rva+size <= a or rva >= b for a,b in raw_ranges), "invalid certificate table")
             else:
                 self.map(rva,size)
-        self.relocations()
+        self.relocation_targets = self.relocations()
         self.cfg = self.guard_config()
         self.imports = self.read_imports()
 
@@ -155,7 +155,7 @@ class PE:
         require(size >= 8 and size <= 4*1024*1024, "missing or oversized base relocations")
         off = self.map(rva,size)
         end = off+size
-        useful = False
+        targets = set()
         while off < end:
             require(span(off,8,end), "truncated relocation block")
             page, n = self.unpack("<II",off)
@@ -165,29 +165,47 @@ class PE:
                 kind = value >> 12
                 require(kind in (0,10), "unexpected AMD64 relocation type")
                 if kind == 10:
-                    self.map(page+(value&4095),8)
-                    useful = True
+                    target = page+(value&4095)
+                    self.map(target,8)
+                    require(target not in targets, "duplicate DIR64 relocation")
+                    targets.add(target)
             off += n
-        require(useful, "no DIR64 relocations")
+        require(targets, "no DIR64 relocations")
+        ordered = sorted(targets)
+        require(all(a+8 <= b for a,b in zip(ordered,ordered[1:])), "overlapping DIR64 relocations")
+        return targets
 
     def guard_config(self):
         rva,size = self.dirs[10]
         require(148 <= size <= 4096, "missing or unsupported CFG load config")
         off = self.map(rva,size)
+        config = self.section(rva,size)
+        require(config["read"] and not config["write"] and not config["execute"], "load config not read-only data")
         require(148 <= self.u32(off) <= size, "truncated CFG load config")
         check, dispatch, table, count = self.unpack("<QQQQ",off+112)
         flags = self.u32(off+144)
         require(flags & 0x500 == 0x500, "CFG instrumentation/function table missing")
         require(0 < count <= 262144 and table >= self.image_base, "invalid CFG function table")
+        require(check != dispatch, "aliased CFG pointer slots")
+        require({rva+112,rva+120,rva+128} <= self.relocation_targets,
+                "missing CFG VA field relocations")
+        initial_targets = []
         for ptr in (check,dispatch):
-            require(ptr >= self.image_base, "missing CFG pointer slot")
+            require(ptr >= self.image_base and ptr % 8 == 0, "missing or unaligned CFG pointer slot")
             slot = ptr-self.image_base
-            require(self.section(slot,8)["read"], "unreadable CFG pointer slot")
-            self.map(slot,8)
+            section = self.section(slot,8)
+            require(section["read"] and not section["write"] and not section["execute"],
+                    "CFG pointer slot not read-only data")
+            require(slot in self.relocation_targets, "missing CFG pointer relocation")
+            initial = self.u64(self.map(slot,8))
+            require(initial >= self.image_base, "missing initial CFG function pointer")
+            self.executable(initial-self.image_base)
+            initial_targets.append(initial-self.image_base)
         stride = 4 + (flags >> 28)
+        require(stride == 4, "unsupported extended CFG table entries")
         start = self.map(table-self.image_base,count*stride)
-        require(self.section(table-self.image_base,count*stride)["read"] and
-                not self.section(table-self.image_base,count*stride)["write"], "writable CFG table")
+        section = self.section(table-self.image_base,count*stride)
+        require(section["read"] and not section["write"] and not section["execute"], "CFG table not read-only data")
         last = -1
         for i in range(count):
             target = self.u32(start+i*stride)
@@ -196,38 +214,54 @@ class PE:
             last = target
         return dict(guard_flags=flags, function_count=count, entry_size=stride,
                     check_pointer_rva=check-self.image_base, dispatch_pointer_rva=dispatch-self.image_base,
-                    table_rva=table-self.image_base)
+                    table_rva=table-self.image_base, initial_target_rvas=initial_targets)
 
     def read_imports(self):
         rva,size = self.dirs[1]
         require(40 <= size <= 65536, "missing or oversized imports")
         start = self.map(rva,size)
+        iat_rva, iat_size = self.dirs[12]
+        require(16 <= iat_size <= 8*(MAX_IMPORTS+32) and iat_rva % 8 == 0 and iat_size % 8 == 0,
+                "missing or malformed IAT directory")
+        iat_section = self.section(iat_rva,iat_size)
+        require(iat_section["read"] and not iat_section["write"] and not iat_section["execute"],
+                "IAT not read-only data")
+        self.map(iat_rva,iat_size)
         result, total = {}, 0
+        ranges = []
         for off in range(start,start+size-19,20):
             lookup,stamp,forward,name,iat = self.unpack("<IIIII",off)
             if not any((lookup,stamp,forward,name,iat)):
                 require(result and not any(self.data[off:start+size]), "invalid import terminator")
+                ordered = sorted(ranges)
+                require(all(a[1] <= b[0] for a,b in zip(ordered,ordered[1:])), "overlapping import thunk arrays")
                 return result
             require(not stamp and not forward and lookup and name and iat, "unsupported import descriptor")
             dll = self.cstring(name).lower()
             require(dll in DLLS and dll not in result, "unreviewed or duplicate DLL: "+dll)
-            symbols = []
+            require(lookup % 8 == 0 and iat % 8 == 0, "unaligned import thunk array")
+            symbols = set()
             for i in range(MAX_IMPORTS+1):
+                require(span(iat+i*8-iat_rva,8,iat_size), "IAT thunk outside declared directory")
                 value = self.u64(self.map(lookup+i*8,8))
                 iat_value = self.u64(self.map(iat+i*8,8))
                 require(value == iat_value, "unexpected prebound IAT")
                 if value == 0:
                     break
                 require(total < MAX_IMPORTS and value < 2**32, "ordinal or oversized import inventory")
-                self.map(value,2)
+                self.map(value,3)
                 symbol = self.cstring(value+2)
                 require(symbol.lower() not in DENIED, "denied direct import: "+symbol)
                 require(symbol not in symbols, "duplicate import symbol")
-                symbols.append(symbol)
+                symbols.add(symbol)
                 total += 1
             else:
                 raise ValueError("unterminated thunk table")
             require(symbols, "empty import descriptor")
+            length = 8*(len(symbols)+1)
+            self.map(lookup,length)
+            self.map(iat,length)
+            ranges.extend(((lookup,lookup+length),(iat,iat+length)))
             result[dll] = sorted(symbols)
         raise ValueError("unterminated import descriptors")
 
@@ -237,6 +271,9 @@ def analyze(data):
     return dict(size=len(data), sha256=digest(data), machine="AMD64", format="PE32+",
                 dll_characteristics=pe.flags, mitigations=dict(aslr=True, high_entropy_va=True, dep=True, cfg=True),
                 cfg=pe.cfg, sections=pe.sections, direct_imports=pe.imports,
+                relocations={"dir64_count":len(pe.relocation_targets),
+                             "directory_rva":pe.dirs[5][0],"directory_size":pe.dirs[5][1]},
+                iat={"directory_rva":pe.dirs[12][0],"directory_size":pe.dirs[12][1]},
                 delay_imports="absent", bound_imports="absent")
 
 
@@ -252,7 +289,10 @@ def make_sbom(report, sha, build):
 
 
 def read_bounded(path, limit):
-    require(not path.is_symlink() and stat.S_ISREG(path.stat().st_mode), "not a regular input")
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and
+            not getattr(info,"st_file_attributes",0) & getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0),
+            "not a regular input")
     with path.open("rb") as stream:
         data = stream.read(limit+1)
     require(len(data) <= limit, "oversized input")

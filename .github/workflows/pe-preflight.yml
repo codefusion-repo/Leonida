@@ -63,6 +63,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B scripts/binary_security.py --binary "$env:RUNNER_TEMP/pe-build/Release/gta6rt.exe" --toolchain "$env:RUNNER_TEMP/pe-build/runtime-toolchain-Release.txt" --build cmake --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/native-evidence"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/inspect_native_pe.ps1 -Binary "$env:RUNNER_TEMP/pe-build/Release/gta6rt.exe" -Build cmake -Evidence "$env:RUNNER_TEMP/native-evidence"
           ctest --test-dir "$env:RUNNER_TEMP/pe-build" -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B runtime/test/loader_lifecycle_test.py "$env:RUNNER_TEMP/pe-build/Release/loader_lifecycle_test.exe"
@@ -75,6 +76,7 @@ jobs:
           & ./scripts/build_runtime.ps1 -DirectMsvc
           python -I -B scripts/binary_security.py --binary runtime/build/gta6rt.exe --toolchain runtime/build/runtime-toolchain-direct.txt --build direct --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/native-evidence"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/inspect_native_pe.ps1 -Binary runtime/build/gta6rt.exe -Build direct -Evidence "$env:RUNNER_TEMP/native-evidence"
           python -I -B runtime/test/dll_dry_run_test.py runtime/build/gta6rt.exe
           exit $LASTEXITCODE
       - name: Verify actual PowerShell first-look wrapper
