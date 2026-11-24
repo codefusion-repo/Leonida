@@ -3,10 +3,14 @@ on:
   push:
     paths:
       - 'runtime/**'
+      - 'scripts/build_runtime.ps1'
+      - 'scripts/first_look.ps1'
       - '.github/workflows/pe-preflight.yml'
   pull_request:
     paths:
       - 'runtime/**'
+      - 'scripts/build_runtime.ps1'
+      - 'scripts/first_look.ps1'
       - '.github/workflows/pe-preflight.yml'
 permissions:
   contents: read

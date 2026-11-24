@@ -101,7 +101,7 @@ hours on one core for now.
 | Version check | Every package file's name, size and SHA-256 for each supported version | `game/`, `make_game.py` |
 | Shader pipeline | Carves DXBC containers from `shaders.rpf` without its encrypted table of contents. Unpacks the `XBCH` → `FSSM` native RDNA2 program, disassembles it with LLVM (`gfx1013`) and translates it to SPIR-V | `tools/shader_carve.py`, `fssm_unpack.py`, `shader_disasm.py`, `rdna2spirv.py` |
 | Asset export | Finds validated resources inside RPF9 archives and the loose `.ttpf` texture pools | `tools/rpf9dump` (on rpf9-explorer's Core) |
-| Runtime | Maps the PE image, resolves imports to shims (GDK, XMem, `d3d12_xs`) | `runtime/` |
+| Runtime | Maps an explicit PE as non-executable data and reports registered shim coverage | `runtime/` |
 | Research tools | PE/RTTI inspection, raw carving, texture tiling probes, GPU test harnesses | `tools/`, `runtime/test/` |
 
 The translator's runtime contract (user SGPRs, push constants, memory model, bindless images, vertex fetch,

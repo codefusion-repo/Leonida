@@ -25,9 +25,23 @@ python -I (Join-Path $root "tools\pe_inspect.py") $Exe --game-dir $GameDir --out
 if ($LASTEXITCODE -ne 0) { throw "pe_inspect failed" }
 
 $rt = Join-Path $root "runtime\build\gta6rt.exe"
-if (-not (Test-Path $rt)) { & (Join-Path $PSScriptRoot "build_runtime.ps1") }
-Write-Host "`n== Loader dry run (map, relocate, bind imports; nothing executes)"
-& $rt --dry-run $Exe --game-dir $GameDir 2>&1 | Tee-Object (Join-Path $out "dryrun.txt") | Select-Object -Last 40
+# Do not run a cached pre-hardening executable. The build script checks its exit code.
+& (Join-Path $PSScriptRoot "build_runtime.ps1")
+if (-not (Test-Path -LiteralPath $rt -PathType Leaf)) { throw "runtime build output missing" }
+Write-Host "`n== Loader dry run (diagnostic shim coverage; no image execution)"
+# Capture the native exit status before processing the report. Exit 3 is an
+# incomplete coverage report, not permission to run the image.
+$previous = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    $dryReport = & $rt --dry-run $Exe --game-dir $GameDir 2>&1
+    $dryStatus = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previous
+}
+$dryReport | Tee-Object (Join-Path $out "dryrun.txt") | Select-Object -Last 40
+if ($dryStatus -eq 3) { Write-Warning "Unimplemented imports; diagnostic report only." }
+elseif ($dryStatus -ne 0) { throw "runtime dry-run failed ($dryStatus)" }
 
 # Shim to-do list, grouped by DLL, most functions first.
 $report = Get-Content (Join-Path $out "$name.json") -Raw | ConvertFrom-Json

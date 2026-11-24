@@ -23,7 +23,7 @@ const char* binding_name(rt::Binding b) {
 }
 
 int usage() {
-    std::fprintf(stderr, "usage: gta6rt --dry-run <image> [--game-dir DIR]\n");
+    std::fprintf(stderr, "usage: gta6rt --dry-run <image> [--game-dir DIR] (use -- before a path starting with -)\n");
     return 2;
 }
 
@@ -31,20 +31,31 @@ int usage() {
 
 int wmain(int argc, wchar_t** argv) {
     std::filesystem::path image, game_dir;
-    bool dry_run = false;
+    bool dry_run = false, game_dir_seen = false, positional_only = false;
     for (int i = 1; i < argc; ++i) {
-        std::wstring a = argv[i];
-        if (a == L"--dry-run") dry_run = true;
-        else if (a == L"--game-dir" && i + 1 < argc) game_dir = argv[++i];
-        else if (image.empty()) image = a;
-        else return usage();
+        const std::wstring a = argv[i];
+        if (!positional_only && a == L"--") { positional_only = true; continue; }
+        if (!positional_only && a == L"--dry-run") {
+            if (dry_run) return usage();
+            dry_run = true;
+        } else if (!positional_only && a == L"--game-dir") {
+            if (game_dir_seen || i + 1 >= argc) return usage();
+            const std::wstring value = argv[++i];
+            if (value.empty() || value.front() == L'-') return usage();
+            game_dir = value;
+            game_dir_seen = true;
+        } else if (a.empty() || (!positional_only && a.front() == L'-') || !image.empty()) {
+            return usage();
+        } else {
+            image = a;
+        }
     }
     if (image.empty()) return usage();
     if (!dry_run) {
         std::fprintf(stderr, "Only --dry-run exists so far: running game code needs the shims listed by it first.\n");
         return 2;
     }
-    if (!game_dir.empty()) std::fprintf(stderr, "note: --game-dir is ignored in diagnostic-only mode\n");
+    if (game_dir_seen) std::fprintf(stderr, "note: --game-dir is ignored in diagnostic-only mode\n");
 
     try {
         rt::Loader loader;

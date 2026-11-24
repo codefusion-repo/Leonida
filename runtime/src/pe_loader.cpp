@@ -11,7 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 
-#include "../shims/shims.h"
+#include "../shims/diagnostic_registry.h"
 
 namespace rt {
 
@@ -97,7 +97,7 @@ void Loader::bind_imports(Module& m) {
     // allocate executable thunks or write function addresses into the image.
     for (const auto& item : m.pending_imports) {
         const std::string sym = item.by_ordinal ? "#" + std::to_string(item.ordinal) : item.name;
-        const auto diagnostic = dll::classify(item.dll, sym, shims::find);
+        const auto diagnostic = dll::classify(item.dll, sym, shims::registered);
         m.imports.push_back({diagnostic.key, diagnostic.symbol,
                              diagnostic.registered ? Binding::Shim : Binding::Unimplemented});
     }

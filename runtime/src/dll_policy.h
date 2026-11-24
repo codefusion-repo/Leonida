@@ -34,7 +34,20 @@ struct Diagnostic {
 template<class Registry>
 Diagnostic classify(std::string_view name, std::string_view symbol, Registry&& registry) {
     auto key = normalize(name);
-    if (symbol.empty()) throw std::runtime_error("empty import symbol");
-    return {key, std::string(symbol), registry(key, std::string(symbol)) != nullptr};
+    if (symbol.empty() || symbol.size() > 1023)
+        throw std::runtime_error("invalid import symbol length");
+    for (const unsigned char c : symbol)
+        if (c < 0x21 || c > 0x7e) throw std::runtime_error("invalid import symbol character");
+    if (symbol.front() == '#') {
+        if (symbol.size() < 2 || symbol.size() > 6 || symbol[1] == '0')
+            throw std::runtime_error("invalid import ordinal");
+        unsigned ordinal = 0;
+        for (const char c : symbol.substr(1)) {
+            if (c < '0' || c > '9') throw std::runtime_error("invalid import ordinal");
+            ordinal = ordinal * 10 + static_cast<unsigned>(c - '0');
+        }
+        if (ordinal > 65535) throw std::runtime_error("invalid import ordinal");
+    }
+    return {key, std::string(symbol), registry(key, symbol)};
 }
 } // namespace rt::dll

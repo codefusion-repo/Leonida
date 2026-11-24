@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "shims.h"
+#include "shim_symbols.h"
 
 namespace {
 
@@ -40,9 +41,6 @@ long __stdcall XMemGetWorkingSetStatistics(void* stats) {
 
 }  // namespace
 
-SHIM_TABLE(xmem,
-    {"xmem.dll", "XMemAlloc", reinterpret_cast<void*>(&XMemAlloc)},
-    {"xmem.dll", "XMemFree", reinterpret_cast<void*>(&XMemFree)},
-    {"xmem.dll", "XMemVirtualQuery", reinterpret_cast<void*>(&XMemVirtualQuery)},
-    {"xmem.dll", "XMemGetWorkingSetStatistics", reinterpret_cast<void*>(&XMemGetWorkingSetStatistics)},
-);
+#define LEONIDA_CALLABLE_ENTRY(dll, name) {dll, #name, reinterpret_cast<void*>(&name)},
+SHIM_TABLE(xmem, LEONIDA_XMEM_SYMBOLS(LEONIDA_CALLABLE_ENTRY));
+#undef LEONIDA_CALLABLE_ENTRY
