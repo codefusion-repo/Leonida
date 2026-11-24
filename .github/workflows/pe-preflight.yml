@@ -80,7 +80,7 @@ jobs:
           & ./scripts/inspect_native_pe.ps1 -Binary runtime/build/gta6rt.exe -Build direct -Evidence "$env:RUNNER_TEMP/native-evidence"
           python -I -B tests/test_native_link_evidence.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -I -B scripts/native_link_evidence.py --binary runtime/build/gta6rt.exe --stdout runtime/build/runtime-link.stdout.txt --stderr runtime/build/runtime-link.stderr.txt --evidence "$env:RUNNER_TEMP/native-evidence"
+          python -I -B scripts/native_link_evidence.py --binary runtime/build/gta6rt.exe --stdout runtime/build/runtime-link.stdout.txt --stderr runtime/build/runtime-link.stderr.txt --map runtime/build/runtime-link.map --evidence "$env:RUNNER_TEMP/native-evidence"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B runtime/test/dll_dry_run_test.py runtime/build/gta6rt.exe
           exit $LASTEXITCODE

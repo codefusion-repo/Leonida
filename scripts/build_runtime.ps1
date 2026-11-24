@@ -41,12 +41,12 @@ if (-not $DirectMsvc -and (Test-Path $cmake) -and (Test-Path $ninja)) {
     if (Test-Path -LiteralPath $toolchain) { Remove-Item -LiteralPath $toolchain -ErrorAction Stop }
     $linkOptions = ""
     if ($LinkEvidence) {
-        foreach ($name in @("runtime-link.stdout.txt", "runtime-link.stderr.txt")) {
+        foreach ($name in @("runtime-link.stdout.txt", "runtime-link.stderr.txt", "runtime-link.map")) {
             $trace = Join-Path $out $name
             if (Test-Path -LiteralPath $trace) { Remove-Item -LiteralPath $trace -ErrorAction Stop }
         }
         $env:VSLANG = "1033"
-        $linkOptions = "/VERBOSE:LIB >runtime-link.stdout.txt 2>runtime-link.stderr.txt"
+        $linkOptions = "/VERBOSE /MAP:runtime-link.map >runtime-link.stdout.txt 2>runtime-link.stderr.txt"
     }
     # Keep this list in step with runtime\CMakeLists.txt.
     $files = "src\main.cpp", "src\pe_loader.cpp" | ForEach-Object { "`"$src\$_`"" }
@@ -85,5 +85,11 @@ if ($LinkEvidence) {
     }
 }
 if ($p.ExitCode -ne 0) { throw "build failed ($($p.ExitCode))" }
+if ($LinkEvidence) {
+    $map = Join-Path $out "runtime-link.map"
+    if (-not (Test-Path -LiteralPath $map -PathType Leaf) -or (Get-Item -LiteralPath $map).Length -gt 4194304) {
+        throw "missing or oversized linker map"
+    }
+}
 if (-not (Test-Path -LiteralPath (Join-Path $out "gta6rt.exe") -PathType Leaf)) { throw "runtime build output missing" }
 Write-Host "built $out\gta6rt.exe"
