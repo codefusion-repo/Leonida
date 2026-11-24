@@ -25,6 +25,11 @@ $hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant
 $rt = Join-Path $root "runtime\build\gta6rt.exe"
 if (-not (Test-Path -LiteralPath $rt -PathType Leaf)) { throw "runtime build output missing" }
 
+# G4: scan every fresh wrapper runtime in CI before launching diagnostics.
+if ($env:GITHUB_ACTIONS -eq "true") {
+    & (Join-Path $PSScriptRoot "scan_malware.ps1") -Phase Wrapper
+}
+
 # The legacy Python inspector has a separate trust boundary. It is deliberately
 # not called here, including before native preflight or after a validation error.
 $previous = $ErrorActionPreference
