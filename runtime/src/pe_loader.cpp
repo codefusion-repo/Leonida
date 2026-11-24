@@ -104,6 +104,20 @@ const Module& Loader::load(const std::filesystem::path& path) {
 #ifdef LEONIDA_LOADER_FAULT_TEST
     checkpoint(FaultStage::Relocated, m);
 #endif
+    // Diagnostic images are never executable, irrespective of PE section flags.
+    DWORD previous = 0;
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    // Simulate a protection API failure without altering production behavior.
+    if (probe_ && probe_->requested == FaultStage::ProtectFailure)
+        checkpoint(FaultStage::ProtectFailure, m);
+#endif
+    if (!VirtualProtect(bytes, m.size, PAGE_READONLY, &previous))
+        throw std::runtime_error("cannot seal diagnostic image");
+    if (previous != PAGE_READWRITE)
+        throw std::runtime_error("unexpected diagnostic page protection");
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    checkpoint(FaultStage::Sealed, m);
+#endif
     module_ = std::move(candidate);
     return *module_;
 }

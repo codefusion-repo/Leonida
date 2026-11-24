@@ -1,5 +1,5 @@
 // Shim registry: reimplementations of console-only imports.
-// Add a DLL by writing a shims/<dll>.cpp with a SHIM_TABLE and listing it in CMakeLists.txt.
+// Callable shims are dormant; never link them into the diagnostic target.
 #pragma once
 #include <string>
 
@@ -18,11 +18,7 @@ struct Table {
 
 void* find(const std::string& dll_lower, const std::string& name);
 
-// Makes a small thunk that logs "dll!name" once and returns 0 (in rax and xmm0).
-void* make_unimplemented_thunk(const std::string& dll, const std::string& name);
-
-// Prints every unimplemented import that has been called.
-void report_called_unimplemented();
+// Unknown symbols return nullptr; no executable fallback is generated.
 
 }  // namespace rt::shims
 

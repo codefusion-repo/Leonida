@@ -19,14 +19,14 @@ template<class F> void reject(F f) {
     try { f(); } catch (const std::runtime_error&) { failed = true; }
     check(failed, "expected runtime_error");
 }
-void pages(uintptr_t address, uint32_t size, bool live) {
+void pages(uintptr_t address, uint32_t size, bool live, DWORD protection = PAGE_READONLY) {
     check(address != 0 && size != 0, "missing allocation observation");
     MEMORY_BASIC_INFORMATION info{};
     for (uintptr_t p = address; p < address + size;) {
         check(VirtualQuery(reinterpret_cast<const void*>(p), &info, sizeof(info)) != 0, "VirtualQuery failed");
         if (live) {
-            check(info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE &&
-                  reinterpret_cast<uintptr_t>(info.AllocationBase) == address, "page not owned RW data");
+            check(info.State == MEM_COMMIT && info.Protect == protection &&
+                  reinterpret_cast<uintptr_t>(info.AllocationBase) == address, "page not owned with expected data protection");
         } else {
             check(info.State == MEM_FREE, "page not released");
         }
@@ -49,7 +49,8 @@ int wmain(int argc, wchar_t** argv) {
             check(!loader.module() && !probe.address, "preflight failure allocated or published");
 
             // Fail at each boundary after native allocation, including bad_alloc.
-            for (const auto stage : {rt::FaultStage::Allocated, rt::FaultStage::Copied, rt::FaultStage::Relocated}) {
+            for (const auto stage : {rt::FaultStage::Allocated, rt::FaultStage::Copied, rt::FaultStage::Relocated,
+                                     rt::FaultStage::ProtectFailure, rt::FaultStage::Sealed}) {
                 for (int iteration = 0; iteration < 8; ++iteration) {
                     probe = {stage};
                     bool failed = false;
@@ -64,6 +65,7 @@ int wmain(int argc, wchar_t** argv) {
             const auto& m = loader.load(good);
             address = reinterpret_cast<uintptr_t>(m.base());
             size = m.size;
+            check(size == 0x3000, "executable-metadata fixture missing");
             check(address && loader.module() == &m, "retry did not publish module");
             pages(address, size, true);
             probe = {};
@@ -74,8 +76,8 @@ int wmain(int argc, wchar_t** argv) {
             loader.test_probe(nullptr);
         }
         pages(address, size, false);
-        for (auto limits : {rt::Limits{64, 8192, 9000}, rt::Limits{4096, 4096, 9000},
-                            rt::Limits{4096, 8192, 8192}}) {
+        for (auto limits : {rt::Limits{64, 12288, 16000}, rt::Limits{4096, 4096, 16000},
+                            rt::Limits{4096, 12288, 12288}}) {
             rt::Loader limited(limits);
             rt::FaultProbe probe;
             limited.test_probe(&probe);
@@ -89,11 +91,11 @@ int wmain(int argc, wchar_t** argv) {
         rt::Loader collision;
         reject([&] { collision.load(good); });
         check(!collision.module(), "collision published module");
-        pages(address, size, true);
+        pages(address, size, true, PAGE_READWRITE);
         guard.reset();
         pages(address, size, false);
 
-        std::cout << "Loader lifecycle PASS: 24 injected faults, rollback/retry, collision, budgets, page release\n";
+        std::cout << "Loader lifecycle PASS: 40 injected faults, rollback/retry, collision, budgets, page release\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
