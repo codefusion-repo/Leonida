@@ -59,13 +59,13 @@ int wmain(int argc, wchar_t** argv) {
 
     try {
         rt::Loader loader;
-        loader.load(image);
+        const auto* m = &loader.load(image);
         int unimplemented = 0;
-        for (auto* m : loader.modules()) {
+        {
             std::map<rt::Binding, int> counts;
             for (auto& r : m->imports) counts[r.binding]++;
             std::printf("%-36s base=%p%s size=%u entry=+%#x  shim=%d host=%d module=%d unimplemented=%d\n",
-                        m->name.c_str(), m->base, m->relocated ? " (relocated)" : "", m->size, m->entry_rva,
+                        m->name.c_str(), static_cast<const void*>(m->base()), m->relocated ? " (relocated)" : "", m->size, m->entry_rva,
                         counts[rt::Binding::Shim], counts[rt::Binding::Host], counts[rt::Binding::Module],
                         counts[rt::Binding::Unimplemented]);
             for (auto& r : m->imports)
@@ -74,7 +74,7 @@ int wmain(int argc, wchar_t** argv) {
                     unimplemented += r.binding == rt::Binding::Unimplemented;
                 }
         }
-        std::printf("%zu module(s) mapped, %d unimplemented import(s)\n", loader.modules().size(), unimplemented);
+        std::printf("%zu module(s) mapped, %d unimplemented import(s)\n", size_t{1}, unimplemented);
         return unimplemented ? 3 : 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
