@@ -34,12 +34,17 @@ if (-not $DirectMsvc -and (Test-Path $cmake) -and (Test-Path $ninja)) {
     # Never accept a stale executable as evidence of this direct build.
     $target = Join-Path $out "gta6rt.exe"
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -ErrorAction Stop }
+    $toolchain = Join-Path $out "runtime-toolchain-direct.txt"
+    if (Test-Path -LiteralPath $toolchain) { Remove-Item -LiteralPath $toolchain -ErrorAction Stop }
     # Keep this list in step with runtime\CMakeLists.txt.
     $files = "src\main.cpp", "src\pe_loader.cpp" | ForEach-Object { "`"$src\$_`"" }
     $opt = if ($Debug) { "/Od /MDd" } else { "/O2 /MD" }
     $body = @"
 cd /d "$out" || exit /b 1
-cl /nologo /std:c++20 /EHsc /W4 /permissive- /utf-8 /Zi $opt /MP$jobs /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DUNICODE /D_UNICODE $($files -join ' ') /Fe:gta6rt.exe || exit /b 1
+cl /nologo /Bv /std:c++20 /EHsc /W4 /permissive- /utf-8 /GS /guard:cf /Zi $opt /MP$jobs /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DUNICODE /D_UNICODE $($files -join ' ') /Fe:gta6rt.exe /link /guard:cf /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /FIXED:NO || exit /b 1
+if not defined VCToolsVersion exit /b 1
+if not defined WindowsSDKVersion exit /b 1
+(echo compiler=MSVC %VCToolsVersion%& echo sdk=%WindowsSDKVersion%& echo configuration=$cfg)>runtime-toolchain-direct.txt || exit /b 1
 "@
     if (-not $DirectMsvc) {
         $body += "`r`n" + @"
