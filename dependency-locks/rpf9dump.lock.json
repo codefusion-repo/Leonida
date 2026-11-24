@@ -1,0 +1,26 @@
+{
+  "dependencies": {
+    "net8.0": {
+      "BCnEncoder.Net": {
+        "contentHash": "DJhHJiBJKXUXxlkkrv74ckzJb3wYxqIAZHjXD9G76kpsD0YyJOmqtNufHWEuJe0eH0tB1tCZn80/3JV2UVP7yQ==",
+        "dependencies": {
+          "CommunityToolkit.HighPerformance": "8.4.0"
+        },
+        "resolved": "2.3.0",
+        "type": "Transitive"
+      },
+      "CommunityToolkit.HighPerformance": {
+        "contentHash": "flxspiBs0G/0GMp7IK2J2ijV9bTG6hEwFc/z6ekHqB6nwRJ4Ry2yLdx+TkbCUYFCl4XhABkAwomeKbT6zM2Zlg==",
+        "resolved": "8.4.0",
+        "type": "Transitive"
+      },
+      "rpfpreview.core": {
+        "dependencies": {
+          "BCnEncoder.Net": "[2.3.0, )"
+        },
+        "type": "Project"
+      }
+    }
+  },
+  "version": 1
+}
