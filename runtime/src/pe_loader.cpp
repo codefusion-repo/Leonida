@@ -1,4 +1,5 @@
 #include "pe_loader.h"
+#include "pe_validation.h"
 
 #include <windows.h>
 
@@ -19,9 +20,16 @@ std::string lower(std::string s) {
 namespace {
 
 std::vector<uint8_t> read_file(const std::filesystem::path& p) {
-    std::ifstream f(p, std::ios::binary);
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("cannot open " + p.string());
-    return {std::istreambuf_iterator<char>(f), {}};
+    const std::streamoff size = f.tellg();
+    if (size < 0 || static_cast<uint64_t>(size) > pe::max_file_bytes)
+        throw std::runtime_error("invalid PE file size");
+    std::vector<uint8_t> file(static_cast<size_t>(size));
+    f.seekg(0);
+    if (!f || (!file.empty() && !f.read(reinterpret_cast<char*>(file.data()), size)))
+        throw std::runtime_error("cannot read complete PE file");
+    return file;
 }
 
 template <class T>
@@ -57,47 +65,40 @@ Module& Loader::load(const std::filesystem::path& image) {
 
 Module& Loader::map_image(const std::filesystem::path& path) {
     auto file = read_file(path);
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(file.data());
-    if (file.size() < sizeof(IMAGE_DOS_HEADER) || dos->e_magic != IMAGE_DOS_SIGNATURE)
-        throw std::runtime_error(path.string() + ": not an MZ image");
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(file.data() + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
-        throw std::runtime_error(path.string() + ": not an x86-64 PE");
-    auto& oh = nt->OptionalHeader;
+    // Validate all header and section ranges before creating a module or mapping memory.
+    const auto layout = pe::validate(file);
 
     auto* m = new Module;
     m->name = path.filename().string();
     m->path = path;
-    m->preferred_base = oh.ImageBase;
-    m->size = oh.SizeOfImage;
-    m->entry_rva = oh.AddressOfEntryPoint;
+    m->preferred_base = layout.image_base;
+    m->size = layout.image_size;
+    m->entry_rva = layout.entry_rva;
     by_name_[lower(m->name)] = m;
     order_.push_back(m);
 
     m->base = static_cast<uint8_t*>(
-        VirtualAlloc(reinterpret_cast<void*>(oh.ImageBase), oh.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        VirtualAlloc(reinterpret_cast<void*>(layout.image_base), layout.image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!m->base) {
-        auto& relocs = oh.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-        if (!relocs.Size)
+        auto& relocs = layout.directories[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        if (!relocs.size)
             throw std::runtime_error(m->name + ": preferred base is taken and the image has no relocations");
-        m->base = static_cast<uint8_t*>(VirtualAlloc(nullptr, oh.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        m->base = static_cast<uint8_t*>(VirtualAlloc(nullptr, layout.image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!m->base) throw std::runtime_error(m->name + ": VirtualAlloc failed");
     }
 
-    std::memcpy(m->base, file.data(), oh.SizeOfHeaders);
-    auto* sec = IMAGE_FIRST_SECTION(nt);
-    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
-        uint32_t n = std::min(sec->SizeOfRawData, sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData);
-        if (n && sec->PointerToRawData + n <= file.size())
-            std::memcpy(m->base + sec->VirtualAddress, file.data() + sec->PointerToRawData, n);
+    std::memcpy(m->base, file.data(), layout.headers_size);
+    for (const auto& sec : layout.sections) {
+        if (const auto n = sec.copy_size())
+            std::memcpy(m->base + sec.rva, file.data() + sec.raw_offset, n);
     }
 
-    int64_t delta = reinterpret_cast<int64_t>(m->base) - static_cast<int64_t>(oh.ImageBase);
+    int64_t delta = reinterpret_cast<int64_t>(m->base) - static_cast<int64_t>(layout.image_base);
     if (delta) {
         m->relocated = true;
-        auto& dir = oh.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-        auto* block = at<IMAGE_BASE_RELOCATION>(m->base, dir.VirtualAddress);
-        auto* end = reinterpret_cast<uint8_t*>(block) + dir.Size;
+        auto& dir = layout.directories[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        auto* block = at<IMAGE_BASE_RELOCATION>(m->base, dir.rva);
+        auto* end = reinterpret_cast<uint8_t*>(block) + dir.size;
         while (reinterpret_cast<uint8_t*>(block) < end && block->SizeOfBlock) {
             auto* entries = reinterpret_cast<uint16_t*>(block + 1);
             size_t count = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / 2;
