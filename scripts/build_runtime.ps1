@@ -1,7 +1,10 @@
 # Builds runtime\build\gta6rt.exe with MSVC at BelowNormal priority, on half the cores.
 # Uses VS's CMake + Ninja when the "C++ CMake tools" component is installed, otherwise calls cl.exe directly.
-param([switch]$Debug, [switch]$DirectMsvc)
+param([switch]$Debug, [switch]$DirectMsvc, [switch]$LinkEvidence)
 $ErrorActionPreference = "Stop"
+if ($LinkEvidence -and (-not $DirectMsvc -or $env:GITHUB_ACTIONS -ne "true")) {
+    throw "LinkEvidence is restricted to direct CI builds"
+}
 
 $root = Split-Path $PSScriptRoot -Parent
 $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
@@ -36,12 +39,21 @@ if (-not $DirectMsvc -and (Test-Path $cmake) -and (Test-Path $ninja)) {
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -ErrorAction Stop }
     $toolchain = Join-Path $out "runtime-toolchain-direct.txt"
     if (Test-Path -LiteralPath $toolchain) { Remove-Item -LiteralPath $toolchain -ErrorAction Stop }
+    $linkOptions = ""
+    if ($LinkEvidence) {
+        foreach ($name in @("runtime-link.stdout.txt", "runtime-link.stderr.txt")) {
+            $trace = Join-Path $out $name
+            if (Test-Path -LiteralPath $trace) { Remove-Item -LiteralPath $trace -ErrorAction Stop }
+        }
+        $env:VSLANG = "1033"
+        $linkOptions = "/VERBOSE:LIB >runtime-link.stdout.txt 2>runtime-link.stderr.txt"
+    }
     # Keep this list in step with runtime\CMakeLists.txt.
     $files = "src\main.cpp", "src\pe_loader.cpp" | ForEach-Object { "`"$src\$_`"" }
     $opt = if ($Debug) { "/Od /MDd" } else { "/O2 /MD" }
     $body = @"
 cd /d "$out" || exit /b 1
-cl /nologo /Bv /std:c++20 /EHsc /W4 /permissive- /utf-8 /GS /guard:cf /Zi $opt /MP$jobs /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DUNICODE /D_UNICODE $($files -join ' ') /Fe:gta6rt.exe /link /guard:cf /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /FIXED:NO || exit /b 1
+cl /nologo /Bv /std:c++20 /EHsc /W4 /permissive- /utf-8 /GS /guard:cf /Zi $opt /MP$jobs /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DUNICODE /D_UNICODE $($files -join ' ') /Fe:gta6rt.exe /link /guard:cf /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /FIXED:NO $linkOptions || exit /b 1
 if not defined VCToolsVersion exit /b 1
 if not defined WindowsSDKVersion exit /b 1
 (echo compiler=MSVC %VCToolsVersion%& echo sdk=%WindowsSDKVersion%& echo configuration=$cfg)>runtime-toolchain-direct.txt || exit /b 1
@@ -62,6 +74,16 @@ $p = Start-Process -FilePath $cmd -ArgumentList ('/d /v:off /s /c ""{0}""' -f $b
 $null = $p.Handle  # keeps the exit code readable after WaitForExit
 try { $p.PriorityClass = "BelowNormal" } catch {}
 $p.WaitForExit()
+if ($LinkEvidence) {
+    foreach ($name in @("runtime-link.stdout.txt", "runtime-link.stderr.txt")) {
+        $trace = Join-Path $out $name
+        if (-not (Test-Path -LiteralPath $trace -PathType Leaf)) { throw "missing linker trace $name" }
+        if ((Get-Item -LiteralPath $trace).Length -gt 4194304) { throw "oversized linker trace $name" }
+        if ($p.ExitCode -ne 0 -or $name -eq "runtime-link.stderr.txt") {
+            Get-Content -LiteralPath $trace | Write-Host
+        }
+    }
+}
 if ($p.ExitCode -ne 0) { throw "build failed ($($p.ExitCode))" }
 if (-not (Test-Path -LiteralPath (Join-Path $out "gta6rt.exe") -PathType Leaf)) { throw "runtime build output missing" }
 Write-Host "built $out\gta6rt.exe"

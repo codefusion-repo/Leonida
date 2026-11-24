@@ -25,6 +25,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           python3 -I -B runtime/test/memory_policy_test.py
           python3 -I -B tests/test_binary_security.py -v
+          python3 -I -B tests/test_native_link_evidence.py -v
           clang++ --version
           clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer runtime/test/pe_validation_test.cpp -o "$RUNNER_TEMP/pe_validation_test"
           ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/pe_validation_test"
@@ -73,10 +74,14 @@ jobs:
       - name: Build direct MSVC and verify diagnostic integration
         shell: pwsh
         run: |
-          & ./scripts/build_runtime.ps1 -DirectMsvc
+          & ./scripts/build_runtime.ps1 -DirectMsvc -LinkEvidence
           python -I -B scripts/binary_security.py --binary runtime/build/gta6rt.exe --toolchain runtime/build/runtime-toolchain-direct.txt --build direct --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/native-evidence"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./scripts/inspect_native_pe.ps1 -Binary runtime/build/gta6rt.exe -Build direct -Evidence "$env:RUNNER_TEMP/native-evidence"
+          python -I -B tests/test_native_link_evidence.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -B scripts/native_link_evidence.py --binary runtime/build/gta6rt.exe --stdout runtime/build/runtime-link.stdout.txt --stderr runtime/build/runtime-link.stderr.txt --evidence "$env:RUNNER_TEMP/native-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B runtime/test/dll_dry_run_test.py runtime/build/gta6rt.exe
           exit $LASTEXITCODE
       - name: Verify actual PowerShell first-look wrapper
