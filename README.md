@@ -34,12 +34,14 @@ happens **on your PC, from your own copy of the game**.
 
 ## Project status
 
+The capability table below is historical research status, not current execution readiness. The default entrypoint no longer discovers or checks game files; all metadata inspection and execution remain HOLD.
+
 **Early. The game does not boot yet.** Everything that can be done without the game's executable is in place, so
 work on booting can start as soon as one is available to a developer.
 
 | What | Status |
 |---|---|
-| Finding and checking your copy (Xbox Series 1.0.2.1) | ✅ Works |
+| Finding and checking your copy (historical capability) | HOLD — disabled in default entrypoint |
 | Shaders: carve, unpack native RDNA2 code, disassemble | ✅ All 26,503 |
 | Shaders: RDNA2 → SPIR-V translation | ✅ **All 26,503**: 2,236 VS, 12,101 PS, 2,689 CS, 9,282 mesh, 195 geometry. All pass `spirv-val`, with a per-shader metadata index for pipeline creation. ⚠️ 21,545 are wave64: exact on 64-wide subgroups (AMD), and cross-half wave ops are approximate on 32-wide (NVIDIA) |
 | Shader translator checked on a real GPU | ⚠️ Vertex fetch, texture sampling, exports, ALU ops, partial-register ops, barycentrics, wave-uniform branches and compute (LDS, barriers, buffer stores) checked on one GPU |
@@ -52,53 +54,13 @@ work on booting can start as soon as one is available to a developer.
 
 ## How to build
 
-The port isn't downloaded ready-made. It's built on your PC from your own copy.
-
-**The easy way:**
-
-1. Install the prerequisites below.
-2. Download this project **with its submodule**: `git clone --recursive https://github.com/ItsNotRexed/Leonida`. A
-   "Download ZIP" from GitHub leaves out `third_party/rpf9-explorer`. The build fetches it if `git` is installed,
-   and otherwise tells you what to do.
-3. Double-click **`Build.bat`**.
-
-It finds your copy of the game by itself: it looks in Downloads, Desktop, Documents, Games, your home folder and
-the top of every drive, two folders deep. It recognises the version from a few file sizes, without reading
-anything large. If you have more than one copy it asks which one, and if it finds none it asks you to paste the
-folder. Before starting it checks that everything below is installed and that there is enough free space, and it
-lists anything missing in one go. The result goes to `Documents\Leonida`. A stopped build continues where it left
-off.
-
-Your game folder is the one that holds `MicrosoftGame.Config` and the `.rpf` archives, as plain files.
-
-**Prerequisites:**
-
-- **Your own copy** of the Xbox Series package, version 1.0.2.1.
-- **Windows 10/11 x64**, with about **350 GB** free for work files. They can go on another drive with `--work`.
-- [Python 3.11+](https://www.python.org/downloads/) (tick "Add python.exe to PATH").
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
-- [Vulkan SDK](https://vulkan.lunarg.com/), for `spirv-as` / `spirv-val`.
-- [LLVM 21+](https://github.com/llvm/llvm-project/releases) with `llvm-mc` on PATH, or set `LLVM_MC` to its path.
-- Visual Studio 2022 with **Desktop development with C++**, for the runtime stage.
-
-**From a terminal**, with the same behaviour and more control:
-
-```powershell
-python -I make_game.py --find                          # list the copies found on this PC
-python -I make_game.py --check                         # check your copy, build nothing
-python -I make_game.py --game "D:\path\to\your\package" --out "D:\Games\Leonida" --work "E:\leonida-work"
-python -I make_game.py --stages shaders,assets         # only some stages
-```
-
-Stages run in order: `check`, `shaders`, `assets`, `runtime`, `pipelines` (creates every translated shader on your
-GPU driver and saves a pipeline cache, so the first boot doesn't compile them). The shader translation is the longest step: several
-hours on one core for now.
+**Host execution HOLD.** The default build entrypoint is disabled. Do not run historical build instructions or external tools on a personal machine. See [build security](docs/build-security.md) and [readiness gates](docs/secure-development.md). S5.2 exposes lexical-only planning for explicit synthetic paths in reviewed disposable environments; it does not authorize preparation, compilation or GPU execution.
 
 ## How it works
 
 | Piece | What it does | Where |
 |---|---|---|
-| Version check | Every package file's name, size and SHA-256 for each supported version | `game/`, `make_game.py` |
+| Version check (historical) | Reference metadata only; no default inspection | `game/` |
 | Shader pipeline | Carves DXBC containers from `shaders.rpf` without its encrypted table of contents. Unpacks the `XBCH` → `FSSM` native RDNA2 program, disassembles it with LLVM (`gfx1013`) and translates it to SPIR-V | `tools/shader_carve.py`, `fssm_unpack.py`, `shader_disasm.py`, `rdna2spirv.py` |
 | Asset export | Finds validated resources inside RPF9 archives and the loose `.ttpf` texture pools | `tools/rpf9dump` (on rpf9-explorer's Core) |
 | Runtime | Maps an explicit PE as non-executable data and reports registered shim coverage | `runtime/` |

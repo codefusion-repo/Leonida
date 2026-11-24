@@ -26,6 +26,7 @@ jobs:
           python3 -I -B runtime/test/memory_policy_test.py
           python3 -I -B tests/test_binary_security.py -v
           python3 -I -B tests/test_native_link_evidence.py -v
+          python3 -I -B tests/test_build_policy.py -v
           clang++ --version
           clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer runtime/test/pe_validation_test.cpp -o "$RUNNER_TEMP/pe_validation_test"
           ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/pe_validation_test"
@@ -61,6 +62,8 @@ jobs:
           cmake --build "$env:RUNNER_TEMP/pe-build" --config Release --target gta6rt pe_validation_test pe_relocation_test pe_symbols_test dll_policy_test loader_limits_test loader_lifecycle_test shim_registry_test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B tests/test_binary_security.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -B tests/test_build_policy.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B scripts/binary_security.py --binary "$env:RUNNER_TEMP/pe-build/Release/gta6rt.exe" --toolchain "$env:RUNNER_TEMP/pe-build/runtime-toolchain-Release.txt" --build cmake --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/native-evidence"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
