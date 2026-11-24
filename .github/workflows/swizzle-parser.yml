@@ -1,0 +1,42 @@
+name: Swizzle parser security
+on:
+  push:
+    paths:
+      - 'tools/amd_swizzle.py'
+      - 'tests/test_swizzle_parser.py'
+      - 'tests/check_swizzle_mesa.py'
+      - '.github/workflows/swizzle-parser.yml'
+  pull_request:
+    paths:
+      - 'tools/amd_swizzle.py'
+      - 'tests/test_swizzle_parser.py'
+      - 'tests/check_swizzle_mesa.py'
+      - '.github/workflows/swizzle-parser.yml'
+permissions:
+  contents: read
+jobs:
+  parser:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+          submodules: false
+      - name: Verify candidate and run synthetic tests
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          python3 --version
+          python3 -I -B tests/test_swizzle_parser.py -v
+      - name: Verify pinned Mesa header and decoded output
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 2097152 \
+            --output "$RUNNER_TEMP/gfx10SwizzlePattern.h" \
+            'https://raw.githubusercontent.com/chaotic-cx/mesa-mirror/4fa244fddfebb21378042556862e197284ef65ac/src/amd/addrlib/src/gfx10/gfx10SwizzlePattern.h'
+          python3 -I -B tests/check_swizzle_mesa.py "$RUNNER_TEMP/gfx10SwizzlePattern.h"
