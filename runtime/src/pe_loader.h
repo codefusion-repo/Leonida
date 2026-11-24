@@ -1,54 +1,70 @@
-// Native PE mapper for Xbox Series (x86-64) images.
-// Maps an explicit image, applies relocations and reports registered shim coverage.
-// It never runs code from the image: DllMain, TLS callbacks and the entry point are left to the caller.
+// Diagnostic-only PE mapper; never executes image code.
 #pragma once
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
-#include "pe_symbols.h"
+#include "loader_limits.h"
 
 namespace rt {
-
 enum class Binding { Shim, Host, Module, Unimplemented };
-
 struct ImportRecord {
-    std::string dll;
-    std::string name;   // "#123" for ordinals
+    std::string dll, name;
     Binding binding;
 };
-
-struct Module {
+struct ImageDeleter {
+    void operator()(uint8_t* p) const noexcept;
+};
+class Loader;
+class Module {
+    friend class Loader;
+    std::unique_ptr<uint8_t, ImageDeleter> allocation_;
+    Module() = default;
+    ~Module() = default;
+    friend struct std::default_delete<Module>;
+public:
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
     std::string name;
     std::filesystem::path path;
-    uint8_t* base = nullptr;
     uint64_t preferred_base = 0;
-    uint32_t size = 0;
-    uint32_t entry_rva = 0;
+    uint32_t size = 0, entry_rva = 0;
     bool relocated = false;
     std::vector<ImportRecord> imports;
-    std::vector<pe::ImportSymbol> pending_imports;
-    std::map<std::string, void*> exports;  // by name, plus "#ordinal"
+    std::map<std::string, uint32_t> exports;
+    const uint8_t* base() const noexcept { return allocation_.get(); }
 };
+
+// Fault controls exist only in the dedicated lifecycle test executable.
+#ifdef LEONIDA_LOADER_FAULT_TEST
+enum class FaultStage { None, Allocated, Copied, Relocated };
+struct FaultProbe {
+    FaultStage requested = FaultStage::None;
+    FaultStage reached = FaultStage::None;
+    uintptr_t address = 0;
+    uint32_t size = 0;
+};
+#endif
 
 class Loader {
+    const Limits limits_;
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    FaultProbe* probe_ = nullptr;
+    void checkpoint(FaultStage stage, const Module& m);
+#endif
+    std::unique_ptr<Module> module_;
 public:
-    Loader() = default;
-    ~Loader();
-
-    // Inspects an explicit image only. Throws std::runtime_error on failure.
-    Module& load(const std::filesystem::path& image);
-
-    const std::vector<Module*>& modules() const { return order_; }
-
-private:
-    Module& map_image(const std::filesystem::path& path);
-    void bind_imports(Module& m);
-    std::map<std::string, Module*> by_name_;  // lower-case file name
-    std::vector<Module*> order_;
+    explicit Loader(Limits limits = {}) : limits_(limits) { limits_.validate_policy(); }
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    void test_probe(FaultProbe* probe) noexcept { probe_ = probe; }
+#endif
+    Loader(const Loader&) = delete;
+    Loader& operator=(const Loader&) = delete;
+    Loader(Loader&&) = delete;
+    Loader& operator=(Loader&&) = delete;
+    const Module& load(const std::filesystem::path& image);
+    const Module* module() const noexcept { return module_.get(); }
 };
-
-std::string lower(std::string s);
-
-}  // namespace rt
+}
