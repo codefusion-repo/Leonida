@@ -61,5 +61,44 @@ class LinkEvidenceTests(unittest.TestCase):
         self.assertTrue(all(not row["provider_verified"] for row in rows))
 
 
+    def test_observed_decorated_cpp_imports(self):
+        cases = [
+            ('struct _Cvtvec __cdecl std::_Locinfo::_Getcvt(void)const ',
+             '?_Getcvt@_Locinfo@std@@QEBA?AU_Cvtvec@@XZ'),
+            ('unsigned short const * __cdecl std::_Locinfo::_W_Getdays(void)const ',
+             '?_W_Getdays@_Locinfo@std@@QEBAPEBGXZ'),
+            ('unsigned short const * __cdecl std::_Locinfo::_W_Getmonths(void)const ',
+             '?_W_Getmonths@_Locinfo@std@@QEBAPEBGXZ'),
+        ]
+        for description, symbol in cases:
+            with self.subTest(symbol=symbol):
+                found = f'Found "__declspec(dllimport) public: {description}" (__imp_{symbol})\n'
+                trace = found + "Referenced in main.obj\nReferenced in pe_loader.obj\nLoaded msvcprt.lib(MSVCP140.dll)\n"
+                # Repeated Found without references must not be sufficient by itself.
+                records = p["parse_trace"](found + "Loaded msvcprt.lib(MSVCP140.dll)\n" + trace)
+                maps = p["parse_map"](" Address Publics by Value Rva+Base Lib:Object\n"
+                                      f" 0005:000003a8 __imp_{symbol} 000000014009b3a8 msvcprt:MSVCP140.dll\n")
+                row = p["corroborate"](p["attribute"]([("msvcp140.dll", symbol)], records), maps)[0]
+                self.assertTrue(row["provider_verified"])
+                self.assertTrue(row["trace_provider_verified"])
+                self.assertEqual(len(row["matches"]), 1)
+                self.assertEqual(row["matches"][0]["references"], ["main.obj", "pe_loader.obj"])
+
+    def test_decorated_format_fail_closed(self):
+        symbol = "?Example@@YAXXZ"
+        for found in (f'Found "description" (__imp_{symbol}) extra',
+                      f'Found "description" (__imp_{symbol}',
+                      f'Found "description" (__imp_{symbol}) (__imp_{symbol})',
+                      f'Found "description __imp_{symbol}"'):
+            with self.subTest(found=found):
+                trace = found + "\nReferenced in a.obj\nLoaded example.lib(example.dll)\n"
+                row = p["attribute"]([("example.dll", symbol)], p["parse_trace"](trace))[0]
+                self.assertEqual(row["matches"], [])
+
+    def test_no_cross_unrelated_line(self):
+        records = p["parse_trace"]("Found __imp_X\nReferenced in a.obj\nUnrelated linker line\nLoaded b.lib(b.dll)\n")
+        self.assertEqual(p["attribute"]([("b.dll", "X")], records)[0]["matches"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

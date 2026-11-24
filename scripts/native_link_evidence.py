@@ -25,13 +25,23 @@ def parse_trace(text):
         if value.startswith("Found "):
             symbol = value[6:].strip()
             require(symbol and len(symbol) <= 1024, "malformed linker symbol")
+            # MSVC /VERBOSE prints some C++ imports as a quoted demangled
+            # description followed by the exact decorated import symbol.
+            # Only recognize this anchored format; never infer from the description.
+            decorated = re.fullmatch(r'"[^"\r\n]+"\s+\((__imp_\?[^\s()"]+)\)', symbol)
+            if decorated:
+                symbol = decorated[1]
+            elif not re.fullmatch(r'[^\s()"]+', symbol):
+                current = None
+                continue
             current = {"references": [], "loaded": []}
             records.setdefault(symbol, []).append(current)
         elif value.startswith("Referenced in ") and current is not None:
             current["references"].append(value[len("Referenced in "):])
         elif value.startswith("Loaded ") and current is not None:
             current["loaded"].append(value[len("Loaded "):])
-        elif value.startswith(("Searching ", "Finished searching libraries")) or not value:
+        else:
+            # Do not carry references across unrelated trace lines.
             current = None
     return records
 
