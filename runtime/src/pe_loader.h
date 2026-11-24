@@ -45,6 +45,8 @@ struct FaultProbe {
     FaultStage reached = FaultStage::None;
     uintptr_t address = 0;
     uint32_t size = 0;
+    uint32_t protection_error = 0;
+    bool verified_pages = false;
 };
 #endif
 

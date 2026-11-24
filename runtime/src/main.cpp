@@ -10,6 +10,7 @@
 #include <string>
 
 #include "pe_loader.h"
+#include "diagnostic_mitigation.h"
 
 namespace {
 
@@ -58,6 +59,8 @@ int wmain(int argc, wchar_t** argv) {
     if (game_dir_seen) std::fprintf(stderr, "note: --game-dir is ignored in diagnostic-only mode\n");
 
     try {
+        rt::prohibit_dynamic_code();
+        std::fprintf(stderr, "diagnostic dynamic-code mitigation active\n");
         rt::Loader loader;
         const auto* m = &loader.load(image);
         int unimplemented = 0;

@@ -1,4 +1,5 @@
 #include "../src/pe_loader.h"
+#include "../src/diagnostic_mitigation.h"
 #include <windows.h>
 #include <iostream>
 #include <type_traits>
@@ -38,6 +39,7 @@ void pages(uintptr_t address, uint32_t size, bool live, DWORD protection = PAGE_
 int wmain(int argc, wchar_t** argv) {
     if (argc != 3) return 2;
     try {
+        rt::prohibit_dynamic_code();
         const std::filesystem::path good = argv[1], bad = argv[2];
         uintptr_t address = 0;
         uint32_t size = 0;
@@ -58,6 +60,9 @@ int wmain(int argc, wchar_t** argv) {
                     catch (const std::bad_alloc&) { failed = stage == rt::FaultStage::Copied; }
                     catch (const std::runtime_error&) { failed = stage != rt::FaultStage::Copied; }
                     check(failed && probe.reached == stage && !loader.module(), "fault not reached or module published");
+                    check(probe.verified_pages, "live protection not verified");
+                    check((stage == rt::FaultStage::ProtectFailure) == (probe.protection_error != 0),
+                          "real protection failure not observed or unexpected Win32 error");
                     pages(probe.address, probe.size, false);
                 }
             }
@@ -95,7 +100,7 @@ int wmain(int argc, wchar_t** argv) {
         guard.reset();
         pages(address, size, false);
 
-        std::cout << "Loader lifecycle PASS: 40 injected faults, rollback/retry, collision, budgets, page release\n";
+        std::cout << "Loader lifecycle PASS: 40 injected faults (8 real VirtualProtect failures), all live protections, rollback/retry, collision, budgets, page release\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
