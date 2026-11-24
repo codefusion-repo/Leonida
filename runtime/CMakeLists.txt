@@ -32,3 +32,12 @@ if(Vulkan_FOUND)
 else()
   message(STATUS "Vulkan SDK not found: GPU test tools and vk_pipeline_check are not built")
 endif()
+
+# Opt-in, data-only PE validation tests; never launch the runtime or a game image.
+option(LEONIDA_PE_VALIDATION_TESTS "Build PE preflight tests" OFF)
+if(LEONIDA_PE_VALIDATION_TESTS)
+  enable_testing()
+  add_executable(pe_validation_test test/pe_validation_test.cpp)
+  target_compile_options(pe_validation_test PRIVATE /W4 /permissive- /utf-8)
+  add_test(NAME pe_validation COMMAND pe_validation_test)
+endif()
