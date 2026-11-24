@@ -1,55 +1,45 @@
-# Day-one report for the game executable: PE inspection, encryption check, import surface and a loader dry run.
-# Reads the exe only; no game code runs.
+# Diagnostic-only report. Never execute the supplied image or probe its DLL dependencies.
 param(
     [Parameter(Mandatory)][string]$Exe,
-    [string]$GameDir = (Split-Path $Exe -Parent)
+    [string]$GameDir
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+$inputFile = Get-Item -LiteralPath $Exe -ErrorAction Stop
+if ($inputFile.PSIsContainer -or ($inputFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "input must be a regular file"
+}
+$Exe = $inputFile.FullName
+if ($PSBoundParameters.ContainsKey("GameDir")) { Write-Warning "--game-dir is ignored in diagnostic-only mode" }
 $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
 $out = Join-Path $root "reports\exe\$name"
 New-Item -ItemType Directory -Force $out | Out-Null
 
-if (-not (Test-Path $Exe)) { throw "$Exe not found" }
-$fs = [IO.File]::OpenRead($Exe); $mz = New-Object byte[] 2; [void]$fs.Read($mz, 0, 2); $fs.Close()
-if ([Text.Encoding]::ASCII.GetString($mz) -ne "MZ") {
-    throw "$Exe doesn't start with an MZ header. It's still packaged or encrypted, so there's nothing to inspect."
-}
+$size = $inputFile.Length
+if ($size -lt 64 -or $size -gt 1GB) { throw "invalid PE file size" }
+$hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
+"sha256 $hash  size $size" | Set-Content -LiteralPath (Join-Path $out "hash.txt")
 
-$size = (Get-Item $Exe).Length
-$hash = (Get-FileHash $Exe -Algorithm SHA256).Hash.ToLower()
-"sha256 $hash  size $size" | Tee-Object (Join-Path $out "hash.txt")
-
-Write-Host "`n== PE inspection"
-python -I (Join-Path $root "tools\pe_inspect.py") $Exe --game-dir $GameDir --out $out
-if ($LASTEXITCODE -ne 0) { throw "pe_inspect failed" }
-
+# Compile the isolated diagnostic target; do not reuse a cached runtime.
+& (Join-Path $PSScriptRoot "build_runtime.ps1") -DirectMsvc
 $rt = Join-Path $root "runtime\build\gta6rt.exe"
-# Do not run a cached pre-hardening executable. The build script checks its exit code.
-& (Join-Path $PSScriptRoot "build_runtime.ps1")
 if (-not (Test-Path -LiteralPath $rt -PathType Leaf)) { throw "runtime build output missing" }
-Write-Host "`n== Loader dry run (diagnostic shim coverage; no image execution)"
-# Capture the native exit status before processing the report. Exit 3 is an
-# incomplete coverage report, not permission to run the image.
+
+# The legacy Python inspector has a separate trust boundary. It is deliberately
+# not called here, including before native preflight or after a validation error.
 $previous = $ErrorActionPreference
+$previousNative = $PSNativeCommandUseErrorActionPreference
 try {
     $ErrorActionPreference = "Continue"
-    $dryReport = & $rt --dry-run $Exe --game-dir $GameDir 2>&1
+    $PSNativeCommandUseErrorActionPreference = $false
+    $dryReport = & $rt --dry-run -- $Exe 2>&1
     $dryStatus = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previous
+    $PSNativeCommandUseErrorActionPreference = $previousNative
 }
-$dryReport | Tee-Object (Join-Path $out "dryrun.txt") | Select-Object -Last 40
+$dryReport | Tee-Object -FilePath (Join-Path $out "dryrun.txt")
 if ($dryStatus -eq 3) { Write-Warning "Unimplemented imports; diagnostic report only." }
 elseif ($dryStatus -ne 0) { throw "runtime dry-run failed ($dryStatus)" }
-
-# Shim to-do list, grouped by DLL, most functions first.
-$report = Get-Content (Join-Path $out "$name.json") -Raw | ConvertFrom-Json
-$todo = $report.imports | Where-Object { $_.where -eq "shim" } | Sort-Object { -$_.functions.Count }
-$lines = foreach ($t in $todo) { "{0,-40} {1,5}" -f $t.dll, $t.functions.Count }
-$lines | Set-Content (Join-Path $out "shim-todo.txt")
-Write-Host "`n== Shim to-do (DLL, function count)"
-$lines
-$enc = $report.sections | Where-Object { $_.looks_encrypted } | ForEach-Object { $_.name }
-if ($enc) { Write-Warning "High-entropy sections (still encrypted or packed): $($enc -join ', ')" }
-Write-Host "`nReports: $out"
+Write-Host "Reports: $out"
+exit $dryStatus

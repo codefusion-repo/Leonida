@@ -44,7 +44,7 @@ jobs:
   windows:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -64,4 +64,15 @@ jobs:
           ctest --test-dir "$env:RUNNER_TEMP/pe-build" -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I -B runtime/test/dll_dry_run_test.py "$env:RUNNER_TEMP/pe-build/Release/gta6rt.exe"
+          exit $LASTEXITCODE
+      - name: Build direct MSVC and verify diagnostic integration
+        shell: pwsh
+        run: |
+          & ./scripts/build_runtime.ps1 -DirectMsvc
+          python -I -B runtime/test/dll_dry_run_test.py runtime/build/gta6rt.exe
+          exit $LASTEXITCODE
+      - name: Verify actual PowerShell first-look wrapper
+        shell: pwsh
+        run: |
+          python -I -B runtime/test/dll_wrapper_test.py
           exit $LASTEXITCODE
