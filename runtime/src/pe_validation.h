@@ -68,6 +68,8 @@ inline Layout validate(std::span<const uint8_t> bytes) {
             "invalid PE header offset");
     require(read_le(bytes, nt, 4) == 0x4550 && read_le(bytes, nt + 4, 2) == 0x8664,
             "not an AMD64 PE image");
+    const uint64_t characteristics = read_le(bytes, nt + 22, 2);
+    require(characteristics & 0x0002u, "PE is not an executable image");
     const uint64_t count = read_le(bytes, nt + 6, 2);
     require(count >= 1 && count <= 96, "unsupported PE section count");
     require(read_le(bytes, nt + 20, 2) == optional_size, "unsupported PE optional header size");
@@ -98,6 +100,7 @@ inline Layout validate(std::span<const uint8_t> bytes) {
 
     const uint64_t first_rva = (uint64_t(result.headers_size) + section_align - 1) & ~(uint64_t(section_align) - 1);
     bool entry_valid = result.entry_rva == 0;
+    uint64_t raw_end = result.headers_size;
     for (uint64_t i = 0; i < count; ++i) {
         const auto pos = table + i * section_size;
         Section s{static_cast<uint32_t>(read_le(bytes, pos + 12, 4)),
@@ -107,10 +110,12 @@ inline Layout validate(std::span<const uint8_t> bytes) {
                   static_cast<uint32_t>(read_le(bytes, pos + 36, 4))};
         require(s.extent() && s.rva >= first_rva && s.rva % section_align == 0 &&
                 contains(result.image_size, s.rva, s.extent()), "invalid PE virtual section range");
-        if (s.raw_size)
+        if (s.raw_size) {
             require(s.raw_offset >= result.headers_size && s.raw_offset % file_align == 0 &&
                     s.raw_size % file_align == 0 && contains(bytes.size(), s.raw_offset, s.raw_size),
                     "invalid PE raw section range");
+            raw_end = std::max(raw_end, uint64_t(s.raw_offset) + s.raw_size);
+        }
         for (const auto& other : result.sections) {
             require(!overlaps(s.rva, s.extent(), other.rva, other.extent()), "overlapping PE virtual sections");
             require(!overlaps(s.raw_offset, s.raw_size, other.raw_offset, other.raw_size), "overlapping PE raw sections");
@@ -125,10 +130,37 @@ inline Layout validate(std::span<const uint8_t> bytes) {
         auto& d = result.directories[i];
         d.rva = static_cast<uint32_t>(read_le(bytes, opt + 112 + i * 8, 4));
         d.size = static_cast<uint32_t>(read_le(bytes, opt + 116 + i * 8, 4));
-        if (d.size) {
-            // The certificate directory is a file offset, not an RVA.
-            require(d.rva && contains(i == 4 ? bytes.size() : result.image_size, d.rva, d.size),
-                    "invalid PE data directory range");
+        // The AMD64 subset does not use reserved or global-pointer directories.
+        if (i == 7 || i == 8 || i == 15) {
+            require(!d.rva && !d.size, "unsupported PE data directory");
+            continue;
+        }
+        require(bool(d.rva) == bool(d.size), "inconsistent PE data directory");
+        if (!d.size) continue;
+        if (i == 4) {
+            // Certificates live outside mapped section data. This is not signature verification.
+            require(d.rva >= raw_end && d.rva % 8 == 0 && d.size % 8 == 0 &&
+                    contains(bytes.size(), d.rva, d.size), "invalid PE certificate range");
+            continue;
+        }
+        require(contains(result.image_size, d.rva, d.size), "invalid PE data directory range");
+        // Directories consumed by the current mapper must contain at least their fixed
+        // prefix, be naturally aligned, and be entirely in one copied section.
+        // Internal records and referenced RVAs require separate validation before use.
+        uint32_t minimum = 0;
+        switch (i) {
+            case 0: minimum = 40; break;  // export directory
+            case 1: minimum = 20; break;  // import descriptor
+            case 5: minimum = 8; break;   // base relocation block
+            case 13: minimum = 32; break; // delay import descriptor
+            default: break;
+        }
+        if (minimum) {
+            require(d.size >= minimum && d.rva % 4 == 0, "invalid PE directory prefix");
+            const bool backed = std::any_of(result.sections.begin(), result.sections.end(), [&](const Section& s) {
+                return d.rva >= s.rva && contains(s.copy_size(), uint64_t(d.rva) - s.rva, d.size);
+            });
+            require(backed, "PE directory is not backed by copied section data");
         }
     }
     return result;

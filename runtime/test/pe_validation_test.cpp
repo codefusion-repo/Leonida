@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <random>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -18,7 +19,7 @@ Bytes fixture() {
     Bytes b(0x400);
     put(b, 0, 0x5a4d, 2); put(b, 0x3c, nt);
     put(b, nt, 0x4550); put(b, nt + 4, 0x8664, 2); put(b, nt + 6, 1, 2);
-    put(b, nt + 20, 240, 2); put(b, opt, 0x20b, 2);
+    put(b, nt + 20, 240, 2); put(b, nt + 22, 0x0002, 2); put(b, opt, 0x20b, 2);
     put(b, opt + 24, 0x140000000ull, 8);
     put(b, opt + 32, 0x1000); put(b, opt + 36, 0x200);
     put(b, opt + 56, 0x2000); put(b, opt + 60, 0x200); put(b, opt + 108, 16);
@@ -61,14 +62,26 @@ int main() {
         check(rt::pe::validate(b).sections[1].copy_size() == 0, "valid zero-fill section rejected");
         b = fixture(); put(b, opt + 16, 0x1000); put(b, sec + 36, 0x60000020);
         check(rt::pe::validate(b).entry_rva == 0x1000, "valid entry metadata rejected");
-        b = fixture(); put(b, opt + 112 + 4 * 8, 0x300); put(b, opt + 116 + 4 * 8, 0x10);
-        check(rt::pe::validate(b).directories[4].rva == 0x300, "certificate offset rejected");
+        b = fixture(); b.resize(0x410); put(b, opt + 112 + 4 * 8, 0x400); put(b, opt + 116 + 4 * 8, 0x10);
+        check(rt::pe::validate(b).directories[4].rva == 0x400, "certificate offset rejected");
+        constexpr std::array<unsigned, 4> dir_indices{0, 1, 5, 13};
+        constexpr std::array<unsigned, 4> dir_prefixes{40, 20, 8, 32};
+        for (size_t i = 0; i < dir_indices.size(); ++i) {
+            const auto offset = opt + 112 + 8 * dir_indices[i];
+            b = fixture(); put(b, offset, 0x1000); put(b, offset + 4, dir_prefixes[i]);
+            check(rt::pe::validate(b).directories[dir_indices[i]].size == dir_prefixes[i], "directory range rejected");
+            put(b, offset + 4, dir_prefixes[i] - 1); reject(b, "short directory prefix");
+            b = fixture(); put(b, offset, 0x1001); put(b, offset + 4, dir_prefixes[i]); reject(b, "unaligned directory");
+            b = fixture(); put(b, offset, 0x1180); put(b, offset + 4, dir_prefixes[i]); reject(b, "uncopied directory");
+            b = fixture(); put(b, offset, 0x1000); reject(b, "missing directory size");
+        }
         for (size_t size = 0; size < good.size(); ++size)
             reject(Bytes(good.begin(), good.begin() + static_cast<Bytes::difference_type>(size)), "truncation");
         field(0, 0, "DOS signature", 2); field(0x3c, 0xffffffff, "PE offset");
         field(0x3c, nt + 1, "unaligned PE offset"); field(nt, 0, "PE signature");
         field(nt + 4, 0x14c, "machine", 2); field(nt + 6, 0, "zero sections", 2);
         field(nt + 6, 97, "excess sections", 2); field(nt + 20, 112, "optional size", 2);
+        field(nt + 22, 0, "not executable", 2);
         field(opt, 0x10b, "optional magic", 2); field(opt + 108, 15, "directory count");
         field(opt + 32, 0, "section alignment"); field(opt + 36, 3, "file alignment");
         field(opt + 56, 0xffffffff, "image limit"); field(opt + 56, 0, "empty image");
@@ -82,6 +95,9 @@ int main() {
         b = two_sections(); put(b, sec + 40 + 16, 0x200); put(b, sec + 40 + 20, 0x200); reject(b, "overlapping raw sections");
         b = fixture(); put(b, opt + 112, 0x1ff0); put(b, opt + 116, 0x20); reject(b, "directory outside image");
         b = fixture(); put(b, opt + 112 + 4 * 8, 0x3f0); put(b, opt + 116 + 4 * 8, 0x20); reject(b, "certificate outside file");
+        b = fixture(); put(b, opt + 112 + 4 * 8, 0x300); put(b, opt + 116 + 4 * 8, 0x10); reject(b, "certificate overlaps section");
+        b = fixture(); b.resize(0x420); put(b, opt + 112 + 4 * 8, 0x401); put(b, opt + 116 + 4 * 8, 0x10); reject(b, "unaligned certificate");
+        field(opt + 112 + 7 * 8, 1, "reserved directory");
         // Deterministic bounded mutation smoke test; ASan/UBSan check the parser, not the Windows loader.
         std::mt19937 rng(0x5342u);
         for (unsigned i = 0; i < 10000; ++i) {
