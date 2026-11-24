@@ -1,0 +1,7 @@
+# Temporary audit branch — DO NOT MERGE
+
+Related to #17. This branch is intentionally not a production change. It removes the three ordinary workflows from its own tree only so the independent verification does not run Leonida code or binaries. Required checks will intentionally be absent; do not merge this branch. Main and repository settings are not changed.
+
+The push-only independent verifier uses the standard ubuntu-24.04 runner, official preinstalled gh, read-only token, no checkout, no package restore, no signing. It recovers exact historical artifact 14894988679 from run 45340205435, validates ZIP and manifest bytes and verifies the existing attestation for the exact subject and source/workflow SHA online and using the same downloaded bundle and trusted roots for the positive and negative tests. The original signing logs identify attestation #71470127; the CLI scopes to the historical digest and signed invocation. A unique bundle must match. If the API does not expose the numerical attestation ID in the bundle, this is a correlation to the original signing logs, not independent verification of that numeric ID. No new attestation is created.
+
+ZAC-01: zero additional spend objective, standard public runner only, one short workflow per push to this branch, evidence retention 30 days. No changes to main coverage, settings, budget or cache policy. Keep issue #17 open until actual verification and evidence review. Host execution HOLD.
