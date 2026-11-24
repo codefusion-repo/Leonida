@@ -11,15 +11,10 @@ endif()
 add_executable(gta6rt
   src/main.cpp
   src/pe_loader.cpp
-  shims/registry.cpp
-  shims/xmem.cpp
-  shims/d3d12_xs.cpp
 )
 target_compile_definitions(gta6rt PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(gta6rt PRIVATE /W4 /permissive- /utf-8)
-# Static shim tables register themselves at startup; keep the linker from dropping their objects.
-target_link_options(gta6rt PRIVATE /OPT:NOREF)
-target_link_libraries(gta6rt PRIVATE psapi)
+# Diagnostic-only target: no callable shim or executable thunk objects are linked.
 
 # GPU test and pipeline tools (need the Vulkan SDK headers; they load vulkan-1.dll at run time).
 find_package(Vulkan QUIET)
@@ -46,4 +41,7 @@ if(LEONIDA_PE_VALIDATION_TESTS)
   add_executable(pe_symbols_test test/pe_symbols_test.cpp)
   target_compile_options(pe_symbols_test PRIVATE /W4 /permissive- /utf-8)
   add_test(NAME pe_symbols COMMAND pe_symbols_test)
+  add_executable(dll_policy_test test/dll_policy_test.cpp)
+  target_compile_options(dll_policy_test PRIVATE /W4 /permissive- /utf-8)
+  add_test(NAME dll_policy COMMAND dll_policy_test)
 endif()

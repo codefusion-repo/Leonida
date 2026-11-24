@@ -8,6 +8,7 @@
 #include <cstdio>
 
 #include "shims.h"
+#include "shim_symbols.h"
 
 namespace {
 
@@ -33,7 +34,6 @@ HRESULT WINAPI D3D12CreateRootSignatureDeserializer(const void* data, SIZE_T siz
 
 }  // namespace
 
-SHIM_TABLE(d3d12_xs,
-    {"d3d12_xs.dll", "D3D12SerializeVersionedRootSignature", reinterpret_cast<void*>(&D3D12SerializeVersionedRootSignature)},
-    {"d3d12_xs.dll", "D3D12CreateRootSignatureDeserializer", reinterpret_cast<void*>(&D3D12CreateRootSignatureDeserializer)},
-);
+#define LEONIDA_CALLABLE_ENTRY(dll, name) {dll, #name, reinterpret_cast<void*>(&name)},
+SHIM_TABLE(d3d12_xs, LEONIDA_D3D12_XS_SYMBOLS(LEONIDA_CALLABLE_ENTRY));
+#undef LEONIDA_CALLABLE_ENTRY
