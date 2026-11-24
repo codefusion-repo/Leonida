@@ -27,6 +27,10 @@ class PolicyTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             p["validate_workflow"](text)
             for changed in (text.replace("contents: read", "contents: write"),
+                            text.replace("on: [push, pull_request]", "on: [push]"),
+                            text.replace("      - name: Reject external fork PR before checkout", "      - name: Unreviewed fork policy"),
+                            text.replace("        run: exit 1", "        run: exit 0"),
+                            text.replace("    runs-on:", "    if: false\n    runs-on:"),
                             text.replace("persist-credentials: false", "persist-credentials: true"),
                             text.replace("submodules: false", "submodules: recursive"),
                             text.replace(p["ACTIONS"]["actions/checkout"], "v4"),
@@ -36,6 +40,23 @@ class PolicyTests(unittest.TestCase):
                             text + "\n    - uses: other/action@" + "0" * 40 + "\n"):
                 with self.assertRaises(ValueError):
                     p["validate_workflow"](changed)
+
+    def test_signing_policy(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        p["validate_workflow"](source)
+        for changed in (source.replace(" && github.ref_protected", ""),
+                        source.replace("github.event_name == 'push' && github.repository", "github.event_name == 'pull_request' && github.repository"),
+                        source.replace("needs: [check, verify_evidence]", "needs: [check]"),
+                        source.replace("attestations: write", "attestations: read"),
+                        source.replace("subject-path:", "subject-digest:"),
+                        source.replace("merge-multiple: true", "merge-multiple: false"),
+                        source.replace("--expected-digest", "--unexpected-digest"),
+                        source.replace("      manifest_sha256:", "      wrong_digest:"),
+                        source.replace("    needs: check\n", "    needs: []\n"),
+                        source.replace("    outputs:\n", "    permissions:\n      id-token: write\n    outputs:\n")):
+            with self.assertRaises(ValueError):
+                p["validate_workflow"](changed)
 
     def test_reports(self):
         clean = {"version": 1, "parameters": "--vulnerable --include-transitive", "sources": [source], "projects": [

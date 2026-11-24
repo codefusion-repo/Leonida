@@ -1,27 +1,18 @@
 name: PE preflight security
-on:
-  push:
-    paths:
-      - 'runtime/**'
-      - 'scripts/build_runtime.ps1'
-      - 'scripts/first_look.ps1'
-      - '.github/workflows/pe-preflight.yml'
-  pull_request:
-    paths:
-      - 'runtime/**'
-      - 'scripts/build_runtime.ps1'
-      - 'scripts/first_look.ps1'
-      - '.github/workflows/pe-preflight.yml'
+on: [push, pull_request]
 permissions:
   contents: read
 jobs:
   sanitizers:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
+      - name: Reject external fork PR before checkout
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        shell: bash
+        run: exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.CANDIDATE_SHA }}
@@ -45,12 +36,15 @@ jobs:
           clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer runtime/test/loader_limits_test.cpp -o "$RUNNER_TEMP/loader_limits_test"
           ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/loader_limits_test"
   windows:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     timeout-minutes: 15
     env:
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
+      - name: Reject external fork PR before checkout
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        shell: bash
+        run: exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.CANDIDATE_SHA }}
