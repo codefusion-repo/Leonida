@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "pe_symbols.h"
 
 namespace rt {
 
@@ -27,6 +28,7 @@ struct Module {
     uint32_t entry_rva = 0;
     bool relocated = false;
     std::vector<ImportRecord> imports;
+    std::vector<pe::ImportSymbol> pending_imports;
     std::map<std::string, void*> exports;  // by name, plus "#ordinal"
 };
 
@@ -44,7 +46,6 @@ private:
     Module& map_image(const std::filesystem::path& path);
     void bind_imports(Module& m);
     void* resolve(Module& m, const std::string& dll, const std::string& name, uint16_t ordinal, bool by_ordinal);
-    void parse_exports(Module& m);
     void protect_sections(Module& m);
 
     std::filesystem::path game_dir_;

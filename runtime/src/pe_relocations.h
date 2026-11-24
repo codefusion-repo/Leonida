@@ -18,6 +18,11 @@ public:
     RelocationPlan& operator=(const RelocationPlan&) = delete;
     bool present() const { return present_; }
     size_t size() const { return targets_.size(); }
+    bool touches(uint32_t rva, uint32_t size) const {
+        if (!size) return false;
+        const auto first = std::lower_bound(targets_.begin(), targets_.end(), rva >= 7 ? rva - 7 : 0);
+        return first != targets_.end() && uint64_t(*first) < uint64_t(rva) + size;
+    }
     // Apply once to a freshly mapped image of the same validated file.
     void apply(std::span<uint8_t> image, uint64_t actual) const {
         require(image.size() == image_size_, "relocation image size mismatch");

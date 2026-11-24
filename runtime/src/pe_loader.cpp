@@ -1,6 +1,7 @@
 #include "pe_loader.h"
 #include "pe_validation.h"
 #include "pe_relocations.h"
+#include "pe_symbols.h"
 
 #include <windows.h>
 
@@ -69,6 +70,7 @@ Module& Loader::map_image(const std::filesystem::path& path) {
     // Validate all header and section ranges before creating a module or mapping memory.
     const auto layout = pe::validate(file);
     const auto relocations = pe::plan_relocations(file);
+    const auto symbols = pe::plan_symbols(file);
 
     auto* m = new Module;
     m->name = path.filename().string();
@@ -97,23 +99,9 @@ Module& Loader::map_image(const std::filesystem::path& path) {
     const auto actual = reinterpret_cast<uint64_t>(m->base);
     relocations.apply(std::span<uint8_t>(m->base, m->size), actual);
     m->relocated = actual != layout.image_base;
-    parse_exports(*m);
+    for (const auto& e : symbols.exports) m->exports.emplace(e.key, m->base + e.rva);
+    m->pending_imports = symbols.imports;
     return *m;
-}
-
-void Loader::parse_exports(Module& m) {
-    auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
-    auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    if (!dir.Size) return;
-    auto* ed = at<IMAGE_EXPORT_DIRECTORY>(m.base, dir.VirtualAddress);
-    auto* funcs = at<uint32_t>(m.base, ed->AddressOfFunctions);
-    auto* names = at<uint32_t>(m.base, ed->AddressOfNames);
-    auto* ords = at<uint16_t>(m.base, ed->AddressOfNameOrdinals);
-    for (uint32_t i = 0; i < ed->NumberOfFunctions; ++i)
-        if (funcs[i]) m.exports["#" + std::to_string(ed->Base + i)] = m.base + funcs[i];
-    for (uint32_t i = 0; i < ed->NumberOfNames; ++i)
-        m.exports[at<char>(m.base, names[i])] = m.base + funcs[ords[i]];
-    // Forwarded exports (RVA inside the export directory) aren't followed yet; none of the bundled DLLs use them.
 }
 
 void* Loader::resolve(Module& m, const std::string& dll, const std::string& name, uint16_t ordinal, bool by_ordinal) {
@@ -146,34 +134,12 @@ void* Loader::resolve(Module& m, const std::string& dll, const std::string& name
 }
 
 void Loader::bind_imports(Module& m) {
-    auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
-
-    auto bind_thunks = [&](const std::string& dll, IMAGE_THUNK_DATA64* lookup, IMAGE_THUNK_DATA64* iat) {
-        for (; lookup->u1.AddressOfData; ++lookup, ++iat) {
-            bool by_ord = IMAGE_SNAP_BY_ORDINAL64(lookup->u1.Ordinal);
-            uint16_t ord = by_ord ? (uint16_t)IMAGE_ORDINAL64(lookup->u1.Ordinal) : 0;
-            std::string name = by_ord ? "" : at<IMAGE_IMPORT_BY_NAME>(m.base, (uint32_t)lookup->u1.AddressOfData)->Name;
-            iat->u1.Function = reinterpret_cast<uint64_t>(resolve(m, dll, name, ord, by_ord));
-        }
-    };
-
-    auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (dir.Size) {
-        for (auto* d = at<IMAGE_IMPORT_DESCRIPTOR>(m.base, dir.VirtualAddress); d->Name; ++d) {
-            std::string dll = at<char>(m.base, d->Name);
-            uint32_t lookup = d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk;
-            bind_thunks(dll, at<IMAGE_THUNK_DATA64>(m.base, lookup), at<IMAGE_THUNK_DATA64>(m.base, d->FirstThunk));
-        }
+    for (const auto& item : m.pending_imports) {
+        const auto address = reinterpret_cast<uint64_t>(resolve(m, item.dll, item.name, item.ordinal, item.by_ordinal));
+        for (unsigned i = 0; i < 8; ++i)
+            m.base[item.iat + i] = static_cast<uint8_t>(address >> (8 * i));
     }
-    // Delay imports are bound eagerly: simpler, and the full import surface shows up in --dry-run.
-    auto& ddir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-    if (ddir.Size) {
-        for (auto* d = at<IMAGE_DELAYLOAD_DESCRIPTOR>(m.base, ddir.VirtualAddress); d->DllNameRVA; ++d) {
-            std::string dll = at<char>(m.base, d->DllNameRVA);
-            bind_thunks(dll, at<IMAGE_THUNK_DATA64>(m.base, d->ImportNameTableRVA),
-                        at<IMAGE_THUNK_DATA64>(m.base, d->ImportAddressTableRVA));
-        }
-    }
+    m.pending_imports.clear();
 }
 
 void Loader::protect_sections(Module& m) {
