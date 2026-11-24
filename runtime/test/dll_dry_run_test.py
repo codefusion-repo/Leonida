@@ -55,6 +55,8 @@ def main():
                                     capture_output=True, text=True, timeout=20, check=False)
             if result.returncode != code or stdout not in result.stdout or stderr not in result.stderr:
                 raise AssertionError(f"expected exit {code}: {args!r}\n{result.returncode}\n{result.stdout}\n{result.stderr}")
+            if code in (0, 3) and "diagnostic dynamic-code mitigation active" not in result.stderr:
+                raise AssertionError("diagnostic process mitigation not confirmed")
             return result
 
         run(["--dry-run", image, "--game-dir", root], 3,

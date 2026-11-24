@@ -39,12 +39,14 @@ public:
 
 // Fault controls exist only in the dedicated lifecycle test executable.
 #ifdef LEONIDA_LOADER_FAULT_TEST
-enum class FaultStage { None, Allocated, Copied, Relocated };
+enum class FaultStage { None, Allocated, Copied, Relocated, ProtectFailure, Sealed };
 struct FaultProbe {
     FaultStage requested = FaultStage::None;
     FaultStage reached = FaultStage::None;
     uintptr_t address = 0;
     uint32_t size = 0;
+    uint32_t protection_error = 0;
+    bool verified_pages = false;
 };
 #endif
 

@@ -34,6 +34,26 @@ std::vector<uint8_t> read_file(const std::filesystem::path& p, const Limits& lim
     return file;
 }
 
+// Verify the entire owned range, not just the old protection of its first page.
+void verify_data_pages(const uint8_t* bytes, uint32_t size, DWORD expected) {
+    const auto begin = reinterpret_cast<uintptr_t>(bytes);
+    if (!begin || !size || size > UINTPTR_MAX - begin)
+        throw std::runtime_error("invalid diagnostic page range");
+    const auto end = begin + size;
+    for (auto cursor = begin; cursor < end;) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || info.Protect != expected ||
+            reinterpret_cast<uintptr_t>(info.AllocationBase) != begin)
+            throw std::runtime_error("unexpected diagnostic page state");
+        const auto region = reinterpret_cast<uintptr_t>(info.BaseAddress);
+        if (region > cursor || info.RegionSize > UINTPTR_MAX - region ||
+            region + info.RegionSize <= cursor)
+            throw std::runtime_error("invalid diagnostic page region");
+        cursor = region + info.RegionSize;
+    }
+}
+
 }  // namespace
 
 void ImageDeleter::operator()(uint8_t* p) const noexcept {
@@ -43,6 +63,8 @@ void ImageDeleter::operator()(uint8_t* p) const noexcept {
 #ifdef LEONIDA_LOADER_FAULT_TEST
 void Loader::checkpoint(FaultStage stage, const Module& m) {
     if (!probe_) return;
+    verify_data_pages(m.base(), m.size, stage == FaultStage::Sealed ? PAGE_READONLY : PAGE_READWRITE);
+    probe_->verified_pages = true;
     probe_->reached = stage;
     probe_->address = reinterpret_cast<uintptr_t>(m.base());
     probe_->size = m.size;
@@ -103,6 +125,38 @@ const Module& Loader::load(const std::filesystem::path& path) {
     m.relocated = actual != layout.image_base;
 #ifdef LEONIDA_LOADER_FAULT_TEST
     checkpoint(FaultStage::Relocated, m);
+#endif
+    // Diagnostic images are never executable, irrespective of PE section flags.
+    DWORD previous = 0;
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    // Decommit one page of our own test allocation. The actual Windows
+    // protection call must fail for a range containing uncommitted pages.
+    const bool force_protect_failure = probe_ && probe_->requested == FaultStage::ProtectFailure;
+    if (force_protect_failure) {
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        if (!system.dwPageSize || m.size < system.dwPageSize || m.size % system.dwPageSize ||
+            !VirtualFree(bytes + m.size - system.dwPageSize, system.dwPageSize, MEM_DECOMMIT))
+            throw std::runtime_error("cannot prepare protection failure fixture");
+    }
+#endif
+    if (!VirtualProtect(bytes, m.size, PAGE_READONLY, &previous)) {
+#ifdef LEONIDA_LOADER_FAULT_TEST
+        if (force_protect_failure) {
+            probe_->protection_error = GetLastError();
+            probe_->reached = FaultStage::ProtectFailure;
+        }
+#endif
+        throw std::runtime_error("cannot seal diagnostic image");
+    }
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    if (force_protect_failure) throw std::runtime_error("unexpected protection success on decommitted page");
+#endif
+    if (previous != PAGE_READWRITE)
+        throw std::runtime_error("unexpected diagnostic page protection");
+    verify_data_pages(bytes, m.size, PAGE_READONLY);
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    checkpoint(FaultStage::Sealed, m);
 #endif
     module_ = std::move(candidate);
     return *module_;
