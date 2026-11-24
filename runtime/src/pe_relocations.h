@@ -1,25 +1,31 @@
 #pragma once
 #include "pe_validation.h"
+#include <utility>
 
 namespace rt::pe {
 
-// Plans are produced from immutable file bytes, never from the writable mapped image.
+// Construct only from the same immutable file bytes that passed PE preflight.
 class RelocationPlan {
-    uint32_t image_size_;
-    bool present_;
-    std::vector<uint32_t> targets_;
-    RelocationPlan(uint32_t image_size, bool present, std::vector<uint32_t> targets)
-        : image_size_(image_size), present_(present), targets_(std::move(targets)) {}
-    friend RelocationPlan plan_relocations(std::span<const uint8_t>, const Layout&);
+    const uint32_t image_size_;
+    const uint64_t preferred_;
+    const bool present_;
+    const std::vector<uint32_t> targets_;
+    RelocationPlan(const Layout& layout, bool present, std::vector<uint32_t> targets)
+        : image_size_(layout.image_size), preferred_(layout.image_base), present_(present), targets_(std::move(targets)) {}
+    friend RelocationPlan plan_relocations(std::span<const uint8_t>);
 public:
+    RelocationPlan(const RelocationPlan&) = delete;
+    RelocationPlan& operator=(const RelocationPlan&) = delete;
     bool present() const { return present_; }
     size_t size() const { return targets_.size(); }
-    void apply(std::span<uint8_t> image, uint64_t preferred, uint64_t actual) const {
+    // Apply once to a freshly mapped image of the same validated file.
+    void apply(std::span<uint8_t> image, uint64_t actual) const {
         require(image.size() == image_size_, "relocation image size mismatch");
-        if (preferred == actual) return;
+        require(actual && actual % 65536 == 0 &&
+                contains(0x0000800000000000ull, actual, image_size_), "invalid relocation base");
+        if (preferred_ == actual) return;
         require(present_, "rebasing requires relocations");
-        // Unsigned arithmetic implements PE's modulo-2^64 adjustment in either direction.
-        const uint64_t delta = actual - preferred;
+        const uint64_t delta = actual - preferred_;
         for (const uint32_t target : targets_) {
             const uint64_t value = read_le(image, target, 8) + delta;
             for (unsigned i = 0; i < 8; ++i)
@@ -28,16 +34,15 @@ public:
     }
 };
 
-inline RelocationPlan plan_relocations(std::span<const uint8_t> file, const Layout& layout) {
+inline RelocationPlan plan_relocations(std::span<const uint8_t> file) {
     constexpr uint32_t max_directory = 16u * 1024u * 1024u;
     constexpr size_t max_targets = 1u << 20;
+    const auto layout = validate(file);
     const auto dir = layout.directories[5];
-    if (!dir.size) {
-        require(!dir.rva, "inconsistent relocation directory");
-        return RelocationPlan(layout.image_size, false, {});
-    }
-    require(dir.size <= max_directory && dir.rva % 4 == 0 &&
-            contains(layout.image_size, dir.rva, dir.size), "invalid relocation directory");
+    const auto characteristics = read_le(file, read_le(file, 0x3c, 4) + 22, 2);
+    require(!(characteristics & 1u) || !dir.size, "relocations contradict COFF flags");
+    if (!dir.size) return RelocationPlan(layout, false, {});
+    require(dir.size <= max_directory, "relocation directory exceeds policy limit");
     uint64_t file_offset = 0;
     bool backed = false;
     for (const auto& section : layout.sections) {
@@ -80,7 +85,7 @@ inline RelocationPlan plan_relocations(std::span<const uint8_t> file, const Layo
     std::sort(targets.begin(), targets.end());
     for (size_t i = 1; i < targets.size(); ++i)
         require(uint64_t(targets[i - 1]) + 8 <= targets[i], "overlapping relocation targets");
-    return RelocationPlan(layout.image_size, true, std::move(targets));
+    return RelocationPlan(layout, true, std::move(targets));
 }
 
 } // namespace rt::pe

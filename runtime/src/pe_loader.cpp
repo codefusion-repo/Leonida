@@ -68,7 +68,7 @@ Module& Loader::map_image(const std::filesystem::path& path) {
     auto file = read_file(path);
     // Validate all header and section ranges before creating a module or mapping memory.
     const auto layout = pe::validate(file);
-    const auto relocations = pe::plan_relocations(file, layout);
+    const auto relocations = pe::plan_relocations(file);
 
     auto* m = new Module;
     m->name = path.filename().string();
@@ -95,7 +95,7 @@ Module& Loader::map_image(const std::filesystem::path& path) {
     }
 
     const auto actual = reinterpret_cast<uint64_t>(m->base);
-    relocations.apply(std::span<uint8_t>(m->base, m->size), layout.image_base, actual);
+    relocations.apply(std::span<uint8_t>(m->base, m->size), actual);
     m->relocated = actual != layout.image_base;
     parse_exports(*m);
     return *m;
