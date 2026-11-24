@@ -187,7 +187,7 @@ jobs:
           printf 'Negative exit code: %s\nPositive recheck exit code: %s\nTampered SHA-256: %s\n' "$rc" "$post" "$altered" > negative-test.txt
           cat negative.stderr >> negative-test.txt
           python3 -I - <<'PY'
-          import json, re
+          import base64, hashlib, json
           from pathlib import Path
           def require(ok, msg):
               if not ok:
@@ -202,12 +202,28 @@ jobs:
                   "positive verification results changed")
           require(read("negative.exit").strip() == "1", "unexpected negative exit code")
           err = read("negative.stderr")
-          # gh v2.104.0 wraps the inner Sigstore error as 'verifying with issuer ...'.
-          require(re.search(r'Sigstore verification failed', err, re.I) and
-                  re.search(r'verifying with issuer', err, re.I), "negative did not reach Sigstore verification failure")
-          require(not re.search(r'network|timeout|connection refused|could not resolve|unknown flag|authentication failed|failed to build|policy verification failed|failed to choose verifier|failed to get bundle issuer', err, re.I),
-                  "negative failed for an unrelated reason")
+          # gh v2.104.0 verification/sigstore.go returns this exact error only
+          # after verifier.Verify(bundle, policy) fails; the inner reason is not exposed.
+          require(err.strip() == 'Error: verifying with issuer "sigstore.dev"',
+                  "unexpected negative error; review exact CLI output")
           require(not read("negative.stdout").strip(), "unexpected negative JSON result")
+          require(not read("positive-before.stderr").strip() and not read("positive-after.stderr").strip(),
+                  "unexpected positive stderr")
+          # Independently bind both inputs to the previously authenticated DSSE subject.
+          # This supplements the differential CLI test rather than accepting arbitrary exit 1.
+          envelope = json.loads(read("verified-bundle.jsonl"))
+          envelope = envelope.get("bundle", envelope)["dsseEnvelope"]
+          statement = json.loads(base64.b64decode(envelope["payload"], validate=True))
+          verified = json.loads(read("positive-before.stdout"))[0]["verificationResult"]["statement"]
+          require(statement == verified, "signed and verified statements differ")
+          original = hashlib.sha256(Path("manifest.json").read_bytes()).hexdigest()
+          altered = hashlib.sha256(Path("manifest-tampered.json").read_bytes()).hexdigest()
+          require(statement["subject"] == [{"name": "manifest.json", "digest": {"sha256": original}}],
+                  "original not bound to signed subject")
+          require(altered != original and altered == read("tampered.sha256").strip(),
+                  "negative digest is not independently different from signed subject")
+          require(json.loads(read("manifest.json")) == json.loads(read("manifest-tampered.json")),
+                  "negative input changed JSON semantics")
           print("Same-bundle positive and negative cryptographic tests: PASS")
           Path("gate-status.txt").write_text("PASS: same-bundle positive/negative/positive; Sigstore rejection of changed artifact\n")
           PY
