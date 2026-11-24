@@ -10,6 +10,8 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <new>
+#include <utility>
 
 #include "../shims/diagnostic_registry.h"
 
@@ -23,6 +25,7 @@ std::vector<uint8_t> read_file(const std::filesystem::path& p, const Limits& lim
     const std::streamoff size = f.tellg();
     if (size < 0 || static_cast<uint64_t>(size) > pe::max_file_bytes)
         throw std::runtime_error("invalid PE file size");
+    if (size < 64) throw std::runtime_error("invalid PE file size");
     limits.check(static_cast<uint64_t>(size), 0);
     std::vector<uint8_t> file(static_cast<size_t>(size));
     f.seekg(0);
@@ -36,6 +39,19 @@ std::vector<uint8_t> read_file(const std::filesystem::path& p, const Limits& lim
 void ImageDeleter::operator()(uint8_t* p) const noexcept {
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
+
+#ifdef LEONIDA_LOADER_FAULT_TEST
+void Loader::checkpoint(FaultStage stage, const Module& m) {
+    if (!probe_) return;
+    probe_->reached = stage;
+    probe_->address = reinterpret_cast<uintptr_t>(m.base());
+    probe_->size = m.size;
+    if (probe_->requested == stage) {
+        if (stage == FaultStage::Copied) throw std::bad_alloc();
+        throw std::runtime_error("injected lifecycle failure");
+    }
+}
+#endif
 
 const Module& Loader::load(const std::filesystem::path& path) {
     if (module_) throw std::runtime_error("diagnostic loader already owns an image");
@@ -71,14 +87,23 @@ const Module& Loader::load(const std::filesystem::path& path) {
             nullptr, layout.image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)));
         if (!m.allocation_) throw std::runtime_error("VirtualAlloc failed");
     }
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    checkpoint(FaultStage::Allocated, m);
+#endif
     auto* bytes = m.allocation_.get();
     std::memcpy(bytes, file.data(), layout.headers_size);
     for (const auto& sec : layout.sections)
         if (const auto n = sec.copy_size())
             std::memcpy(bytes + sec.rva, file.data() + sec.raw_offset, n);
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    checkpoint(FaultStage::Copied, m);
+#endif
     const auto actual = reinterpret_cast<uint64_t>(bytes);
     relocations.apply(std::span<uint8_t>(bytes, m.size), actual);
     m.relocated = actual != layout.image_base;
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    checkpoint(FaultStage::Relocated, m);
+#endif
     module_ = std::move(candidate);
     return *module_;
 }

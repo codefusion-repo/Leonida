@@ -22,6 +22,8 @@ class Module {
     friend class Loader;
     std::unique_ptr<uint8_t, ImageDeleter> allocation_;
     Module() = default;
+    ~Module() = default;
+    friend struct std::default_delete<Module>;
 public:
     Module(const Module&) = delete;
     Module& operator=(const Module&) = delete;
@@ -35,11 +37,29 @@ public:
     const uint8_t* base() const noexcept { return allocation_.get(); }
 };
 
+// Fault controls exist only in the dedicated lifecycle test executable.
+#ifdef LEONIDA_LOADER_FAULT_TEST
+enum class FaultStage { None, Allocated, Copied, Relocated };
+struct FaultProbe {
+    FaultStage requested = FaultStage::None;
+    FaultStage reached = FaultStage::None;
+    uintptr_t address = 0;
+    uint32_t size = 0;
+};
+#endif
+
 class Loader {
-    Limits limits_;
+    const Limits limits_;
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    FaultProbe* probe_ = nullptr;
+    void checkpoint(FaultStage stage, const Module& m);
+#endif
     std::unique_ptr<Module> module_;
 public:
-    explicit Loader(Limits limits = {}) : limits_(limits) {}
+    explicit Loader(Limits limits = {}) : limits_(limits) { limits_.validate_policy(); }
+#ifdef LEONIDA_LOADER_FAULT_TEST
+    void test_probe(FaultProbe* probe) noexcept { probe_ = probe; }
+#endif
     Loader(const Loader&) = delete;
     Loader& operator=(const Loader&) = delete;
     Loader(Loader&&) = delete;
