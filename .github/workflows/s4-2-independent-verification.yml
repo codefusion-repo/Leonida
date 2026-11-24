@@ -1,0 +1,271 @@
+name: S4.2 independent cryptographic verification (temporary)
+on:
+  push:
+    branches: [audit/s4-2-independent-verification]
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+jobs:
+  independent_signature:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_PROMPT_DISABLED: '1'
+      GH_REPO: codefusion-repo/Leonida
+      SOURCE_SHA: 719d1b70f365d5b24cde67a5f2007cea3ac4c5f4
+      MANIFEST_SHA: 04caf972651c121049e999f7ce97146b65b47ab1bf5c6d5cdcf05e632ae8537a
+      ZIP_SHA: fe9866ac487d685c5a5858b0703d2f16e6e0f6b784ca4052103bc9b1eee76df6
+    steps:
+      - name: Recover exact historical artifact and validate bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/s4-2-verification"
+          cd "$RUNNER_TEMP/s4-2-verification"
+          gh --version | tee gh-version.txt
+          grep -Eq '^gh version 2\.104\.0 \(' gh-version.txt
+          gh api repos/codefusion-repo/Leonida/actions/runs/45340205435 > run.json
+          gh api repos/codefusion-repo/Leonida/actions/artifacts/14894988679 > artifact-metadata.json
+          gh api repos/codefusion-repo/Leonida/actions/artifacts/14894988679/zip > original.zip
+          python3 -I - <<'PY'
+          import hashlib, json, os, stat, zipfile
+          from pathlib import Path
+          sha = os.environ["SOURCE_SHA"]
+          digest = os.environ["MANIFEST_SHA"]
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
+          def h(data):
+              return hashlib.sha256(data).hexdigest()
+          def pairs(items):
+              result = {}
+              for k, v in items:
+                  require(k not in result, "duplicate JSON key")
+                  result[k] = v
+              return result
+          def load(data):
+              return json.loads(data, object_pairs_hook=pairs)
+          run = load(Path("run.json").read_bytes())
+          meta = load(Path("artifact-metadata.json").read_bytes())
+          require(run["id"] == 45340205435 and run["head_sha"] == sha and
+                  run["head_branch"] == "main" and run["event"] == "push" and
+                  run["conclusion"] == "success" and run["run_attempt"] == 1, "run mismatch")
+          require(meta["id"] == 14894988679 and meta["workflow_run"]["id"] == run["id"] and
+                  meta["workflow_run"]["head_sha"] == sha and not meta["expired"], "artifact identity mismatch")
+          raw = Path("original.zip").read_bytes()
+          require(len(raw) == meta["size_in_bytes"] == 3658 and
+                  h(raw) == os.environ["ZIP_SHA"] and meta["digest"] == "sha256:" + h(raw), "ZIP digest mismatch")
+          names = {"audit.json", "rpf9dump.cdx.json", "rpf9dump.lock.json", "rpf9-core.lock.json",
+                   "rpf9dump.advisories.json", "RpfPreview.Core.advisories.json", "manifest.json"}
+          with zipfile.ZipFile("original.zip") as z:
+              infos = z.infolist()
+              require(len(infos) == len(names) and {x.filename for x in infos} == names, "ZIP file set mismatch")
+              for x in infos:
+                  require(not x.is_dir() and 0 < x.file_size <= 65536 and
+                          stat.S_IFMT(x.external_attr >> 16) in (0, stat.S_IFREG) and not x.flag_bits & 1,
+                          "unsafe ZIP entry")
+              manifest = z.read("manifest.json")
+              require(h(manifest) == digest, "manifest digest mismatch")
+              m = load(manifest)
+              require(m["schemaVersion"] == 1 and set(m["files"]) == names - {"manifest.json"}, "manifest schema mismatch")
+              require(m["identity"] == {"candidate": sha, "event": "push", "eventSha": sha,
+                      "ref": "refs/heads/main", "repository": "codefusion-repo/Leonida",
+                      "runAttempt": "1", "runId": "45340205435", "workflowRef":
+                      "codefusion-repo/Leonida/.github/workflows/ci.yml@refs/heads/main", "workflowSha": sha},
+                      "manifest identity mismatch")
+              for name, expected in m["files"].items():
+                  data = z.read(name)
+                  require(expected == {"size": len(data), "sha256": h(data)}, "payload mismatch")
+              Path("manifest.json").write_bytes(manifest)
+          print("Original ZIP, run identity, manifest and six payload SHA-256: PASS")
+          PY
+      - name: Verify original signed bundle and negative control
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          cd "$RUNNER_TEMP/s4-2-verification"
+          policy=(--repo codefusion-repo/Leonida
+            --signer-workflow codefusion-repo/Leonida/.github/workflows/ci.yml
+            --source-ref refs/heads/main --source-digest "$SOURCE_SHA" --signer-digest "$SOURCE_SHA"
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners)
+          # Online verification scopes the repository name to the live GitHub API.
+          capture() {
+            local name="$1"
+            shift
+            local rc=0
+            "$@" > "$name.stdout" 2> "$name.stderr" || rc=$?
+            printf '%s\n' "$rc" > "$name.exit"
+            printf '%s exit code: %s\n' "$name" "$rc"
+            cat "$name.stderr"
+            return "$rc"
+          }
+          capture online gh attestation verify manifest.json "${policy[@]}" --format json
+          cp online.stdout online-result.json
+          gh attestation download manifest.json --repo codefusion-repo/Leonida
+          bundle="sha256:$MANIFEST_SHA.jsonl"
+          test -s "$bundle"
+          # Use the same downloaded bundle and the same trusted roots for both tests.
+          gh attestation trusted-root > trusted_root.jsonl
+          test -s trusted_root.jsonl
+          cp "$bundle" verified-bundle.jsonl
+          capture positive-before gh attestation verify manifest.json "${policy[@]}" --bundle "$bundle" --custom-trusted-root trusted_root.jsonl --format json
+          cp positive-before.stdout verification-result.raw.json
+          python3 -I - "$bundle" <<'PY'
+          import base64, hashlib, json, os, sys
+          from pathlib import Path
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
+          sha = os.environ["SOURCE_SHA"]
+          digest = os.environ["MANIFEST_SHA"]
+          expected_repo = "https://github.com/codefusion-repo/Leonida"
+          # CLI verified result is the authority for authenticated statements.
+          def verify_result(path):
+              entries = json.loads(Path(path).read_bytes())
+              require(len(entries) == 1, "ambiguous verified attestation")
+              vr = entries[0]["verificationResult"]
+              cert = vr["signature"]["certificate"]
+              timestamps = vr["verifiedTimestamps"]
+              require(isinstance(cert, dict) and cert and isinstance(timestamps, list) and timestamps,
+                      "missing verified certificate or timestamps")
+              statement = vr["statement"]
+              require(statement["_type"] == "https://in-toto.io/Statement/v1" and
+                      statement["predicateType"] == "https://slsa.dev/provenance/v1" and
+                      statement["subject"] == [{"name": "manifest.json", "digest": {"sha256": digest}}],
+                      "signed subject mismatch")
+              p = statement["predicate"]
+              b, r = p["buildDefinition"], p["runDetails"]
+              require(b["buildType"] == "https://actions.github.io/buildtypes/workflow/v1" and
+                      b["externalParameters"]["workflow"] == {"ref": "refs/heads/main", "repository": expected_repo,
+                      "path": ".github/workflows/ci.yml"} and
+                      b["internalParameters"]["github"] == {"event_name": "push", "repository_id": "1469620660",
+                      "repository_owner_id": "175957674", "runner_environment": "github-hosted"} and
+                      b["resolvedDependencies"] == [{"uri": "git+" + expected_repo + "@refs/heads/main",
+                      "digest": {"gitCommit": sha}}] and
+                      r["builder"]["id"] == expected_repo + "/.github/workflows/ci.yml@refs/heads/main" and
+                      r["metadata"]["invocationId"] == expected_repo + "/actions/runs/45340205435/attempts/1",
+                      "signed predicate mismatch")
+              return vr
+          online = verify_result("online-result.json")
+          local = verify_result("verification-result.raw.json")
+          require(online == local, "online and local verification differ")
+          path = Path(sys.argv[1])
+          bundles = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+          require(len(bundles) == 1, "ambiguous downloaded bundle")
+          bundle = bundles[0].get("bundle", bundles[0])
+          require(bundle["dsseEnvelope"]["signatures"] and
+                  bundle["verificationMaterial"]["tlogEntries"], "missing DSSE signature or transparency log")
+          signed = json.loads(base64.b64decode(bundle["dsseEnvelope"]["payload"], validate=True))
+          require(signed == local["statement"], "bundle statement mismatch")
+          require(any("rekor" in json.dumps(t).lower() or "transparency" in json.dumps(t).lower()
+                      for t in local["verifiedTimestamps"]), "no identified verified transparency timestamp")
+          # Export parsed, verified fields only; never publish API signed download URLs or tokens.
+          Path("verification-result.json").write_text(json.dumps(local, indent=2, sort_keys=True) + "\n")
+          require(Path("verified-bundle.jsonl").read_bytes() == path.read_bytes(), "bundle copy mismatch")
+          print("Verified certificate, signed DSSE subject, SLSA predicate and transparency timestamps: PASS")
+          print("Bundle SHA-256:", hashlib.sha256(path.read_bytes()).hexdigest())
+          PY
+          # Identical local command, bundle, trust roots and pathname; change only subject bytes.
+          sha256sum "$bundle" trusted_root.jsonl manifest.json verified-bundle.jsonl > trusted-inputs.sha256
+          cp manifest.json manifest-original.json
+          printf ' ' >> manifest.json
+          altered=$(sha256sum manifest.json | cut -d ' ' -f1)
+          test "$altered" != "$MANIFEST_SHA"
+          printf '%s\n' "$altered" > tampered.sha256
+          cp manifest.json manifest-tampered.json
+          rc=0
+          capture negative gh attestation verify manifest.json "${policy[@]}" --bundle "$bundle" --custom-trusted-root trusted_root.jsonl --format json || rc=$?
+          mv manifest-original.json manifest.json
+          post=0
+          capture positive-after gh attestation verify manifest.json "${policy[@]}" --bundle "$bundle" --custom-trusted-root trusted_root.jsonl --format json || post=$?
+          sha256sum -c trusted-inputs.sha256
+          printf 'Negative exit code: %s\nPositive recheck exit code: %s\nTampered SHA-256: %s\n' "$rc" "$post" "$altered" > negative-test.txt
+          cat negative.stderr >> negative-test.txt
+          python3 -I - <<'PY'
+          import base64, hashlib, json
+          from pathlib import Path
+          def require(ok, msg):
+              if not ok:
+                  raise ValueError(msg)
+          def read(name):
+              return Path(name).read_text()
+          require(Path("manifest-tampered.json").read_bytes() == Path("manifest.json").read_bytes() + b" ",
+                  "negative sample differs beyond one byte")
+          require(read("positive-before.exit").strip() == read("positive-after.exit").strip() == "0",
+                  "positive controls failed")
+          require(json.loads(read("positive-before.stdout")) == json.loads(read("positive-after.stdout")),
+                  "positive verification results changed")
+          require(read("negative.exit").strip() == "1", "unexpected negative exit code")
+          err = read("negative.stderr")
+          # gh v2.104.0 verification/sigstore.go returns this exact error only
+          # after verifier.Verify(bundle, policy) fails; the inner reason is not exposed.
+          require(err.strip() == 'Error: verifying with issuer "sigstore.dev"',
+                  "unexpected negative error; review exact CLI output")
+          require(not read("negative.stdout").strip(), "unexpected negative JSON result")
+          require(not read("positive-before.stderr").strip() and not read("positive-after.stderr").strip(),
+                  "unexpected positive stderr")
+          # Independently bind both inputs to the previously authenticated DSSE subject.
+          # This supplements the differential CLI test rather than accepting arbitrary exit 1.
+          envelope = json.loads(read("verified-bundle.jsonl"))
+          envelope = envelope.get("bundle", envelope)["dsseEnvelope"]
+          statement = json.loads(base64.b64decode(envelope["payload"], validate=True))
+          verified = json.loads(read("positive-before.stdout"))[0]["verificationResult"]["statement"]
+          require(statement == verified, "signed and verified statements differ")
+          original = hashlib.sha256(Path("manifest.json").read_bytes()).hexdigest()
+          altered = hashlib.sha256(Path("manifest-tampered.json").read_bytes()).hexdigest()
+          require(statement["subject"] == [{"name": "manifest.json", "digest": {"sha256": original}}],
+                  "original not bound to signed subject")
+          require(altered != original and altered == read("tampered.sha256").strip(),
+                  "negative digest is not independently different from signed subject")
+          require(json.loads(read("manifest.json")) == json.loads(read("manifest-tampered.json")),
+                  "negative input changed JSON semantics")
+          print("Same-bundle positive and negative cryptographic tests: PASS")
+          Path("gate-status.txt").write_text("PASS: same-bundle positive/negative/positive; Sigstore rejection of changed artifact\n")
+          PY
+          sha256sum manifest.json manifest-tampered.json verified-bundle.jsonl trusted_root.jsonl verification-result.json negative-test.txt positive-before.stdout positive-before.stderr positive-before.exit negative.stdout negative.stderr negative.exit positive-after.stdout positive-after.stderr positive-after.exit tampered.sha256 trusted-inputs.sha256 gate-status.txt
+      - name: Retain independent verification evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: s4-2-independent-verification-approved
+          path: |
+            ${{ runner.temp }}/s4-2-verification/manifest.json
+            ${{ runner.temp }}/s4-2-verification/manifest-tampered.json
+            ${{ runner.temp }}/s4-2-verification/verified-bundle.jsonl
+            ${{ runner.temp }}/s4-2-verification/trusted_root.jsonl
+            ${{ runner.temp }}/s4-2-verification/verification-result.json
+            ${{ runner.temp }}/s4-2-verification/negative-test.txt
+            ${{ runner.temp }}/s4-2-verification/*.stdout
+            ${{ runner.temp }}/s4-2-verification/*.stderr
+            ${{ runner.temp }}/s4-2-verification/*.exit
+            ${{ runner.temp }}/s4-2-verification/gh-version.txt
+            ${{ runner.temp }}/s4-2-verification/tampered.sha256
+            ${{ runner.temp }}/s4-2-verification/trusted-inputs.sha256
+            ${{ runner.temp }}/s4-2-verification/gate-status.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain unapproved failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: s4-2-UNAPPROVED-diagnostics
+          path: |
+            ${{ runner.temp }}/s4-2-verification/manifest.json
+            ${{ runner.temp }}/s4-2-verification/manifest-tampered.json
+            ${{ runner.temp }}/s4-2-verification/verified-bundle.jsonl
+            ${{ runner.temp }}/s4-2-verification/trusted_root.jsonl
+            ${{ runner.temp }}/s4-2-verification/verification-result.json
+            ${{ runner.temp }}/s4-2-verification/negative-test.txt
+            ${{ runner.temp }}/s4-2-verification/*.stdout
+            ${{ runner.temp }}/s4-2-verification/*.stderr
+            ${{ runner.temp }}/s4-2-verification/*.exit
+            ${{ runner.temp }}/s4-2-verification/gh-version.txt
+            ${{ runner.temp }}/s4-2-verification/tampered.sha256
+            ${{ runner.temp }}/s4-2-verification/trusted-inputs.sha256
+          if-no-files-found: warn
+          retention-days: 7
