@@ -1,5 +1,6 @@
 #include "pe_loader.h"
 #include "pe_validation.h"
+#include "pe_relocations.h"
 
 #include <windows.h>
 
@@ -67,6 +68,7 @@ Module& Loader::map_image(const std::filesystem::path& path) {
     auto file = read_file(path);
     // Validate all header and section ranges before creating a module or mapping memory.
     const auto layout = pe::validate(file);
+    const auto relocations = pe::plan_relocations(file, layout);
 
     auto* m = new Module;
     m->name = path.filename().string();
@@ -80,8 +82,7 @@ Module& Loader::map_image(const std::filesystem::path& path) {
     m->base = static_cast<uint8_t*>(
         VirtualAlloc(reinterpret_cast<void*>(layout.image_base), layout.image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!m->base) {
-        auto& relocs = layout.directories[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-        if (!relocs.size)
+        if (!relocations.present())
             throw std::runtime_error(m->name + ": preferred base is taken and the image has no relocations");
         m->base = static_cast<uint8_t*>(VirtualAlloc(nullptr, layout.image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!m->base) throw std::runtime_error(m->name + ": VirtualAlloc failed");
@@ -93,25 +94,9 @@ Module& Loader::map_image(const std::filesystem::path& path) {
             std::memcpy(m->base + sec.rva, file.data() + sec.raw_offset, n);
     }
 
-    int64_t delta = reinterpret_cast<int64_t>(m->base) - static_cast<int64_t>(layout.image_base);
-    if (delta) {
-        m->relocated = true;
-        auto& dir = layout.directories[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-        auto* block = at<IMAGE_BASE_RELOCATION>(m->base, dir.rva);
-        auto* end = reinterpret_cast<uint8_t*>(block) + dir.size;
-        while (reinterpret_cast<uint8_t*>(block) < end && block->SizeOfBlock) {
-            auto* entries = reinterpret_cast<uint16_t*>(block + 1);
-            size_t count = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / 2;
-            for (size_t i = 0; i < count; ++i) {
-                uint16_t type = entries[i] >> 12, off = entries[i] & 0xFFF;
-                if (type == IMAGE_REL_BASED_DIR64)
-                    *at<uint64_t>(m->base, block->VirtualAddress + off) += delta;
-                else if (type != IMAGE_REL_BASED_ABSOLUTE)
-                    throw std::runtime_error(m->name + ": unsupported relocation type " + std::to_string(type));
-            }
-            block = reinterpret_cast<IMAGE_BASE_RELOCATION*>(reinterpret_cast<uint8_t*>(block) + block->SizeOfBlock);
-        }
-    }
+    const auto actual = reinterpret_cast<uint64_t>(m->base);
+    relocations.apply(std::span<uint8_t>(m->base, m->size), layout.image_base, actual);
+    m->relocated = actual != layout.image_base;
     parse_exports(*m);
     return *m;
 }
