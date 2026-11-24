@@ -22,15 +22,17 @@ Bytes fixture() {
     put(b, opt+56, 0x2000); put(b, opt+60, 0x200); put(b, opt+108, 16);
     put(b, sec+8, 0x600); put(b, sec+12, 0x1000); put(b, sec+16, 0x600); put(b, sec+20, 0x200); put(b, sec+36, 0xc0000040);
     put(b, opt+112, 0x1000); put(b, opt+116, 40);
+    put(b, 0x20c, 0x1068); str(b, 0x268, "own.dll");
     put(b, 0x210, 1); put(b, 0x214, 1); put(b, 0x218, 1);
     put(b, 0x21c, 0x1050); put(b, 0x220, 0x1054); put(b, 0x224, 0x1058);
     put(b, 0x250, 0x1500); put(b, 0x254, 0x1060); str(b, 0x260, "Data");
     put(b, opt+120, 0x1080); put(b, opt+124, 40);
     put(b, 0x280, 0x1100); put(b, 0x28c, 0x1140); put(b, 0x290, 0x1180);
     put(b, 0x300, 0x1160, 8); put(b, 0x308, 0x8000000000000007ull, 8);
+    put(b, 0x380, 0x1160, 8); put(b, 0x388, 0x8000000000000007ull, 8);
     str(b, 0x340, "test.dll"); str(b, 0x362, "Example");
     put(b, opt+112+13*8, 0x1200); put(b, opt+116+13*8, 64);
-    put(b, 0x400, 1); put(b, 0x404, 0x1140); put(b, 0x40c, 0x1280); put(b, 0x410, 0x1260);
+    put(b, 0x400, 1); put(b, 0x404, 0x1140); put(b, 0x408, 0x12a0); put(b, 0x40c, 0x1280); put(b, 0x410, 0x1260);
     put(b, 0x460, 0x1160, 8);
     return b;
 }
@@ -54,7 +56,29 @@ int main() {
         b=good; put(b,0x300,0x15ff,8); reject(b);
         b=good; put(b,0x280,0x15f8); put(b,0x7f8,0x1160,8); reject(b);
         b=good; str(b,0x260,"#1"); reject(b);
-        b=good; put(b,0x280,0); put(b,0x380,0x1160,8); check(rt::pe::plan_symbols(b).imports.size()==2);
+        b=good; put(b,0x280,0); check(rt::pe::plan_symbols(b).imports.size()==3);
+        bad(0x380,0x1162,8); bad(0x390,1,8); bad(0x488,1,8);
+        bad(0x284,1); bad(0x414,0x12c0); bad(0x418,0x12c0); bad(0x41c,1);
+        bad(0x408,0x1180); bad(0x40c,0x1260); bad(0x250,0x1180);
+        bad(0x21c,0x1054); bad(0x254,0x1054); bad(0x210,0);
+        bad(0x28c,0x1162); // DLL string aliases a hint/name entry (or fails basename policy).
+        b=good; put(b,0x40c,0x1160); reject(b); // delay IAT aliases name metadata
+        b=good; put(b,0x40c,0x15f8); reject(b); // IAT terminator outside copied section
+        b=good; put(b,opt+112+12*8,0x1180); put(b,opt+116+12*8,16); reject(b);
+        b=good; put(b,opt+112+12*8,0x1180); put(b,opt+116+12*8,24); check(rt::pe::plan_symbols(b).imports.size()==3);
+        b=good; put(b,0x300,0x1161,8); reject(b);
+        b=good; put(b,opt+124,41); reject(b);
+        b=good; put(b,0x460,0x1160,8); put(b,0x480,0x140001500ull,8);
+        check(rt::pe::plan_symbols(b).imports.size()==3); // initialized delay IAT pointer
+        // Data-only relocation directory, covering an allowed delay IAT target.
+        auto with_reloc = b;
+        put(with_reloc,opt+112+5*8,0x1400); put(with_reloc,opt+116+5*8,12);
+        put(with_reloc,0x600,0x1000); put(with_reloc,0x604,12); put(with_reloc,0x608,0xa280,2);
+        check(rt::pe::plan_symbols(with_reloc).imports.size()==3);
+        // Disallow relocations into lookup/name/descriptor/export metadata or IAT terminators.
+        for (const uint16_t entry : {uint16_t(0xa100),uint16_t(0xa162),uint16_t(0xa080),uint16_t(0xa050),uint16_t(0xa288),uint16_t(0xa180)}) {
+            b=with_reloc; put(b,0x608,entry,2); reject(b);
+        }
         std::mt19937 rng(0x533233u);
         for (unsigned i=0;i<10000;++i) {
             b=good;

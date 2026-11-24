@@ -99,7 +99,7 @@ int main() {
         check(rt::pe::plan_relocations(b).size() == 0, "padding block");
         // The plan owns its checked offsets; altering input after planning cannot change them.
         b = good; const auto saved = rt::pe::plan_relocations(b);
-        std::fill(b.begin() + 0x400, b.end(), 0xff);
+        std::fill(b.begin() + 0x400, b.end(), uint8_t{0xff});
         image = original; saved.apply(image, preferred + 0x10000);
         auto expected = original; put(expected, 0x1010, preferred + 0x10123, 8);
         check(image == expected, "plan depends on mutable input");
