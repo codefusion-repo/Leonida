@@ -218,13 +218,50 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def canonical_range(value):
+    # NuGet serializes minimum-inclusive unbounded ranges both as "1.2.3"
+    # and "[1.2.3, )". Preserve all other bounds; reject unknown syntax.
+    require(isinstance(value, str) and len(value) <= 128, "invalid version constraint")
+    version = r"\d+(?:\.\d+){0,3}(?:-[0-9A-Za-z.-]+)?"
+    def norm(v):
+        if not v:
+            return ""
+        core, sep, pre = v.partition("-")
+        parts = [str(int(x)) for x in core.split(".")]
+        while len(parts) < 3:
+            parts.append("0")
+        if len(parts) == 4 and parts[-1] == "0":
+            parts.pop()
+        return ".".join(parts) + (sep + pre.lower() if sep else "")
+    value = value.strip()
+    if re.fullmatch(version, value):
+        return ("[", norm(value), "", ")")
+    exact = re.fullmatch(r"\[\s*(" + version + r")\s*\]", value)
+    if exact:
+        v = norm(exact[1])
+        return ("[", v, v, "]")
+    ranged = re.fullmatch(r"([\[(])\s*(" + version + r")?\s*,\s*(" + version + r")?\s*([\])])", value)
+    require(ranged is not None, "unsupported version constraint: " + value)
+    lo, hi = norm(ranged[2]), norm(ranged[3])
+    return (ranged[1] if lo else "(", lo, hi, ranged[4] if hi else ")")
+
+
+def canonical_edges(mapping):
+    result = {}
+    for key, value in mapping.items():
+        require(key.lower() not in result, "duplicate dependency edge")
+        result[key.lower()] = canonical_range(value)
+    return result
+
+
 def validate_lock(lock, assets):
     require(lock.get("version") in (1, 2), "unsupported lock format")
     require(set(lock["dependencies"]) == {"net8.0"}, "unexpected lock framework")
     entries = lock["dependencies"]["net8.0"]
     graph = assets["targets"]["net8.0"]
     by_name = {key.split("/")[0].lower(): (key, node) for key, node in graph.items()}
-    packages = {name for name, (_, node) in by_name.items() if node["type"] == "package"}
+    require(len(by_name) == len(graph), "ambiguous assets identities")
+    require(len({name.lower() for name in entries}) == len(entries), "ambiguous lock identities")
     seen = set()
     for name, item in entries.items():
         key, node = by_name[name.lower()]
@@ -235,11 +272,12 @@ def validate_lock(lock, assets):
                     item["resolved"] == key.split("/")[1] and
                     item["contentHash"] == assets["libraries"][key]["sha512"],
                     "package lock mismatch")
-            seen.add(name.lower())
-        require({k.lower(): v for k, v in item.get("dependencies", {}).items()} ==
-                {k.lower(): v for k, v in node.get("dependencies", {}).items()},
-                "lock dependency edges differ")
-    require(seen == packages, "lock omits resolved packages")
+        seen.add(name.lower())
+        lock_edges = canonical_edges(item.get("dependencies", {}))
+        asset_edges = canonical_edges(node.get("dependencies", {}))
+        require(lock_edges == asset_edges,
+                f"lock dependency edges differ for {name}: lock={lock_edges!r} assets={asset_edges!r}")
+    require(seen == set(by_name), "lock omits resolved libraries")
 
 
 def read_assets(project):
@@ -281,6 +319,14 @@ def restore(locked):
             "NuGet restore/audit failed")
 
 
+def emit_evidence(path, label, value):
+    write_json(path, value)
+    data = path.read_bytes()
+    require(len(data) <= 65536, "dependency evidence exceeds log budget")
+    print(label, path.name, hashlib.sha256(data).hexdigest(),
+          base64.b64encode(data).decode("ascii"), flush=True)
+
+
 def audit(sha, output):
     candidate(sha)
     verify_submodule_input()
@@ -299,6 +345,17 @@ def audit(sha, output):
             write_json(ROOT / path, reviewed[name])
     restore(locked=reviewed is not None)
     generated = read_locks()
+    # Preserve diagnostic evidence even if validation fails. Never treat this
+    # first-stage material as approved or as a successful locked restore.
+    raw = output.parent / "supply-chain-unreviewed"
+    raw.mkdir(parents=True, exist_ok=False)
+    for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
+        assets = read_assets(project)
+        emit_evidence(raw / name, "UNREVIEWED_LOCKFILE", generated[name])
+        graph = {"version": assets["version"], "targets": assets["targets"],
+                 "libraries": {k: {field: v[field] for field in ("type", "sha512") if field in v}
+                               for k, v in assets["libraries"].items()}}
+        emit_evidence(raw / (name + ".graph.json"), "UNREVIEWED_GRAPH", graph)
     for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
         validate_lock(generated[name], read_assets(project))
     if reviewed:
@@ -311,6 +368,7 @@ def audit(sha, output):
         require(not Path(os.environ[name]).exists(), "locked cache must start empty")
     restore(locked=True)
     require(generated == read_locks(), "locked restore modified lockfiles")
+    print("Locked NuGet restore PASS: fresh package and HTTP caches", flush=True)
     for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
         validate_lock(generated[name], read_assets(project))
     bom = sbom(read_assets(PROJECT), sha)
@@ -322,15 +380,12 @@ def audit(sha, output):
                                  "--format", "json", "--output-version", "1"],
                                 cwd=ROOT, capture_output=True, encoding="utf-8", timeout=180)
         require(result.returncode == 0 and not result.stderr.strip(), "NuGet advisory query failed")
-        validate_report(json.loads(result.stdout), Path(project).name)
+        report = json.loads(result.stdout)
+        validate_report(report, Path(project).name)
     output.mkdir(parents=True, exist_ok=False)
-    write_json(output / "rpf9dump.cdx.json", bom)
+    emit_evidence(output / "rpf9dump.cdx.json", "SBOM", bom)
     for name, value in generated.items():
-        path = output / name
-        write_json(path, value)
-        # These are public package identities/hashes, not arbitrary file logs.
-        print("LOCKFILE", name, hashlib.sha256(path.read_bytes()).hexdigest(),
-              base64.b64encode(path.read_bytes()).decode("ascii"), flush=True)
+        emit_evidence(output / name, "LOCKFILE", value)
     packages = [{"name": c["name"], "version": c["version"]} for c in bom["components"] if "purl" in c]
     write_json(output / "audit.json", {"candidate": sha, "submodule": SUB_SHA, "sdk": version,
                                      "source": SOURCE, "mode": "all", "level": "low",

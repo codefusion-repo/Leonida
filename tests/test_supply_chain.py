@@ -67,6 +67,15 @@ class PolicyTests(unittest.TestCase):
                               "dependencies": {"Synthetic": "1.0.0"}},
             "Synthetic": {"type": "Transitive", "resolved": "1.0.0", "contentHash": digest}}}}
         p["validate_lock"](lock, assets)
+        equivalent = copy.deepcopy(lock)
+        equivalent["dependencies"]["net8.0"]["RpfPreview.Core"]["dependencies"]["BCnEncoder.Net"] = "[2.3.0, )"
+        equivalent["dependencies"]["net8.0"]["BCnEncoder.Net"]["dependencies"]["Synthetic"] = "[1.0, )"
+        p["validate_lock"](equivalent, assets)
+        for value in ("[1.0.0]", "(1.0.0, )", "[1.0.0, 2.0.0)", "*"):
+            altered = copy.deepcopy(lock)
+            altered["dependencies"]["net8.0"]["BCnEncoder.Net"]["dependencies"]["Synthetic"] = value
+            with self.assertRaises(ValueError):
+                p["validate_lock"](altered, assets)
         for field, value in (("contentHash", "bad"), ("resolved", "2.4.0"), ("dependencies", {})):
             altered = copy.deepcopy(lock)
             altered["dependencies"]["net8.0"]["BCnEncoder.Net"][field] = value

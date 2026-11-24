@@ -40,6 +40,14 @@ jobs:
         run: |
           python -I -B scripts/supply_chain.py audit --sha $env:CANDIDATE_SHA --output "$env:RUNNER_TEMP/supply-chain"
           exit $LASTEXITCODE
+      - name: Retain failed-bootstrap diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unreviewed-nuget-diagnostics
+          path: ${{ runner.temp }}/supply-chain-unreviewed/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain dependency evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
