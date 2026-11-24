@@ -31,22 +31,75 @@ def _symbols():
     return env
 
 
+def _parse_mask(expression, symbols):
+    """Parse a zero or a caret-separated sequence of known bit symbols."""
+    if len(expression) > 1024:
+        raise ValueError("swizzle mask expression too long")
+    result = 0
+    for term in expression.split("^"):
+        term = term.strip()
+        if term == "0":
+            continue
+        if term not in symbols:
+            raise ValueError("invalid swizzle mask term")
+        result ^= symbols[term]
+    return result
+
+
+MAX_HEADER_BYTES = 2 * 1024 * 1024
+NIBBLE_WIDTHS = {"NIBBLE01": 8, "NIBBLE2": 4, "NIBBLE3": 4, "NIBBLE4": 4}
+
+
+def _table_lines(body):
+    for line in body.splitlines():
+        line = line.strip()
+        if line and not line.startswith("//"):
+            yield line
+
+
 def load(path=HEADER):
-    text = open(path, encoding="utf-8", errors="replace").read()
+    with open(path, "rb") as header:
+        data = header.read(MAX_HEADER_BYTES + 1)
+    if len(data) > MAX_HEADER_BYTES:
+        raise ValueError("swizzle header too large")
+    text = data.decode("utf-8").replace("\r\n", "\n")
     env = _symbols()
     nibbles = {}
-    for name in ("NIBBLE01", "NIBBLE2", "NIBBLE3", "NIBBLE4"):
-        m = re.search(r"GFX10_SW_PATTERN_" + name + r"\[\]\[\d+\]\s*=\s*\{(.*?)\n\};", text, re.S)
-        rows = re.findall(r"\{([^{}]*)\}", m.group(1))
-        nibbles[name] = [[eval(t.strip() or "0", {}, env) for t in r.split(",") if t.strip()] for r in rows]  # noqa: S307
+    for name, width in NIBBLE_WIDTHS.items():
+        matches = list(re.finditer(r"GFX10_SW_PATTERN_" + name + r"\[\]\[([0-9]+)\]\s*=\s*\{(.*?)\n\};", text, re.S))
+        if len(matches) != 1 or matches[0].group(1) != str(width):
+            raise ValueError(f"invalid or missing swizzle table: {name}")
+        rows = []
+        for line in _table_lines(matches[0].group(2)):
+            row = re.fullmatch(r"\{([^{}]*)\}\s*,?\s*(?://.*)?", line)
+            if row is None:
+                raise ValueError(f"invalid swizzle row: {name}")
+            terms = row.group(1).strip().removesuffix(",").split(",")
+            if len(terms) != width or any(not term.strip() for term in terms):
+                raise ValueError(f"invalid swizzle row width: {name}")
+            rows.append([_parse_mask(term, env) for term in terms])
+        if not rows:
+            raise ValueError(f"empty swizzle table: {name}")
+        nibbles[name] = rows
     tables = {}
     for m in re.finditer(r"const ADDR_SW_PATINFO (GFX10_SW_\w+_PATINFO)\[\]\s*=\s*\{(.*?)\n\};", text, re.S):
+        name = m.group(1)
+        if name in tables:
+            raise ValueError(f"duplicate pattern table: {name}")
         entries = []
-        for row in m.group(2).splitlines():
-            mm = re.match(r"\s*\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*\}\s*,\s*//\s*(.*)", row)
-            if mm:
-                entries.append(tuple(int(v) for v in mm.groups()[:5]) + (mm.group(6).strip(),))
-        tables[m.group(1)] = entries
+        for row in _table_lines(m.group(2)):
+            mm = re.fullmatch(r"\{\s*([0-9]{1,10}),\s*([0-9]{1,10}),\s*([0-9]{1,10}),\s*([0-9]{1,10}),\s*([0-9]{1,10}),\s*\}\s*,\s*//\s*(.+)", row)
+            if mm is None:
+                raise ValueError(f"invalid pattern row: {name}")
+            values = tuple(int(v) for v in mm.groups()[:5])
+            if any(index >= len(nibbles[key]) for key, index in zip(NIBBLE_WIDTHS, values[1:])):
+                raise ValueError(f"pattern index out of range: {name}")
+            entries.append(values + (mm.group(6).strip(),))
+        if not entries:
+            raise ValueError(f"empty pattern table: {name}")
+        tables[name] = entries
+    if not tables:
+        raise ValueError("missing pattern tables")
     return nibbles, tables
 
 
