@@ -26,6 +26,8 @@ Work remotely through source inspection and review first. Use only disposable, n
 
 Each unit has its own draft PR; split further when risk warrants. Do not publish exploit reproductions or sensitive vulnerability details in public PRs; coordinate private disclosure where available.
 
+S5.2 is an authorized subdivision of S5 (issue #22): [default build policy](build-security.md). S5.1 remains integrated; execution and toolchain approval are separate.
+
 ## Readiness gates
 
 - [ ] G0 — Inspect exact candidate commit, tree, changes, submodules and relevant history; verify provenance and review all execution entry points.

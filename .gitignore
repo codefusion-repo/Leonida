@@ -35,3 +35,6 @@ __pycache__/
 
 # ---- private Project OS configuration and prompts ----
 .project-os/
+
+# Private local build configuration and output
+game_path.txt
