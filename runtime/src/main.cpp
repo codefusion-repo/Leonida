@@ -1,7 +1,7 @@
 // gta6rt: native runtime for the Xbox Series build.
 //
 //   gta6rt --dry-run <image> [--game-dir DIR]
-//       Maps the image and its bundled modules, applies relocations, binds every import and prints a report.
+//       Maps only the explicit image, applies relocations and reports registered shim coverage.
 //       No code from the image runs.
 #include <windows.h>
 
@@ -44,10 +44,10 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "Only --dry-run exists so far: running game code needs the shims listed by it first.\n");
         return 2;
     }
-    if (game_dir.empty()) game_dir = image.parent_path();
+    if (!game_dir.empty()) std::fprintf(stderr, "note: --game-dir is ignored in diagnostic-only mode\n");
 
     try {
-        rt::Loader loader(game_dir);
+        rt::Loader loader;
         loader.load(image);
         int unimplemented = 0;
         for (auto* m : loader.modules()) {
@@ -64,7 +64,7 @@ int wmain(int argc, wchar_t** argv) {
                 }
         }
         std::printf("%zu module(s) mapped, %d unimplemented import(s)\n", loader.modules().size(), unimplemented);
-        return 0;
+        return unimplemented ? 3 : 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

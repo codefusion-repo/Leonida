@@ -1,5 +1,5 @@
 // Native PE mapper for Xbox Series (x86-64) images.
-// Maps an image, applies relocations and binds every import through the shim registry.
+// Maps an explicit image, applies relocations and reports registered shim coverage.
 // It never runs code from the image: DllMain, TLS callbacks and the entry point are left to the caller.
 #pragma once
 #include <cstdint>
@@ -34,10 +34,10 @@ struct Module {
 
 class Loader {
 public:
-    explicit Loader(std::filesystem::path game_dir) : game_dir_(std::move(game_dir)) {}
+    Loader() = default;
     ~Loader();
 
-    // Loads an image and (recursively) the bundled modules it imports. Throws std::runtime_error on failure.
+    // Inspects an explicit image only. Throws std::runtime_error on failure.
     Module& load(const std::filesystem::path& image);
 
     const std::vector<Module*>& modules() const { return order_; }
@@ -45,10 +45,6 @@ public:
 private:
     Module& map_image(const std::filesystem::path& path);
     void bind_imports(Module& m);
-    void* resolve(Module& m, const std::string& dll, const std::string& name, uint16_t ordinal, bool by_ordinal);
-    void protect_sections(Module& m);
-
-    std::filesystem::path game_dir_;
     std::map<std::string, Module*> by_name_;  // lower-case file name
     std::vector<Module*> order_;
 };
