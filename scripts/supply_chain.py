@@ -91,6 +91,12 @@ def validate_workflow(source):
                 "missing producer identity outputs")
     require(not re.search(r"\bid-token\s*:|\battestations\s*:|actions/attest", source),
             "signing privileges outside approved job")
+    # Required checks must not silently succeed by skipping a whole job.
+    require(source.splitlines()[1] == "on: [push, pull_request]", "required workflows must run on every PR and push")
+    require(not re.search(r"(?m)^    if\s*:", source), "required job must not be conditionally skipped")
+    gate = "      - name: Reject external fork PR before checkout\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository\n        shell: bash\n        run: exit 1\n"
+    require(source.count(gate) == source.count("uses: actions/checkout@"),
+            "missing pre-checkout external fork rejection")
     # Narrow guard for reviewed block-style YAML, not a general YAML parser.
     require(re.search(r"(?m)^permissions:\n  contents: read\n(?=\S)", source) is not None,
             "workflow must declare read-only contents")

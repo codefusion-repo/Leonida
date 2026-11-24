@@ -1,27 +1,18 @@
 name: Swizzle parser security
-on:
-  push:
-    paths:
-      - 'tools/amd_swizzle.py'
-      - 'tests/test_swizzle_parser.py'
-      - 'tests/check_swizzle_mesa.py'
-      - '.github/workflows/swizzle-parser.yml'
-  pull_request:
-    paths:
-      - 'tools/amd_swizzle.py'
-      - 'tests/test_swizzle_parser.py'
-      - 'tests/check_swizzle_mesa.py'
-      - '.github/workflows/swizzle-parser.yml'
+on: [push, pull_request]
 permissions:
   contents: read
 jobs:
   parser:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
+      - name: Reject external fork PR before checkout
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        shell: bash
+        run: exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.CANDIDATE_SHA }}

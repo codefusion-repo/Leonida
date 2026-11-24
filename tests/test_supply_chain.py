@@ -27,6 +27,10 @@ class PolicyTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             p["validate_workflow"](text)
             for changed in (text.replace("contents: read", "contents: write"),
+                            text.replace("on: [push, pull_request]", "on: [push]"),
+                            text.replace("      - name: Reject external fork PR before checkout", "      - name: Unreviewed fork policy"),
+                            text.replace("        run: exit 1", "        run: exit 0"),
+                            text.replace("    runs-on:", "    if: false\n    runs-on:"),
                             text.replace("persist-credentials: false", "persist-credentials: true"),
                             text.replace("submodules: false", "submodules: recursive"),
                             text.replace(p["ACTIONS"]["actions/checkout"], "v4"),
