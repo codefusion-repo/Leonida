@@ -27,6 +27,7 @@ ACTIONS = {
     "actions/setup-python": "a26af69be951a213d495a4c3e4e4022e16d87065",
     "actions/setup-dotnet": "67a3573c9a986a3f9c594539f4ab511d57bb3ce9",
     "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
 }
 
 
@@ -74,7 +75,19 @@ def verify_submodule_checkout():
             "nested submodule not authorized")
 
 
+# The sole privileged exception is an exact, reviewed, main-only job.
+# This is a regression guard, not a security boundary for workflow authors.
+SIGNER_JOB = "  attest:\n    if: github.event_name == 'push' && github.repository == 'codefusion-repo/Leonida' && github.ref == 'refs/heads/main' && github.ref_protected\n    needs: [check, verify_evidence]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    env:\n      CANDIDATE_SHA: ${{ github.sha }}\n    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n        with:\n          ref: ${{ env.CANDIDATE_SHA }}\n          persist-credentials: false\n          submodules: false\n      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093\n        with:\n          artifact-ids: ${{ needs.check.outputs.artifact_id }}\n          path: ${{ runner.temp }}/reviewed-evidence\n      - name: Verify exact evidence before signing\n        run: python3 -I -B scripts/artifact_integrity.py verify --directory \"$RUNNER_TEMP/reviewed-evidence\" --sha \"$CANDIDATE_SHA\" --signing\n      - name: Attest evidence manifest\n        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be\n        with:\n          subject-path: ${{ runner.temp }}/reviewed-evidence/manifest.json\n"
+
 def validate_workflow(source):
+    if "\n  attest:\n" in source:
+        require(source.endswith(SIGNER_JOB) and source.count("\n  attest:\n") == 1,
+                "unreviewed signing job")
+        source = source[:-len(SIGNER_JOB)]
+        require("  verify_evidence:\n    needs: check\n" in source,
+                "missing unprivileged evidence verification")
+    require(not re.search(r"\bid-token\s*:|\battestations\s*:|actions/attest", source),
+            "signing privileges outside approved job")
     # Narrow guard for reviewed block-style YAML, not a general YAML parser.
     require(re.search(r"(?m)^permissions:\n  contents: read\n(?=\S)", source) is not None,
             "workflow must declare read-only contents")

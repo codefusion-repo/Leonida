@@ -37,6 +37,19 @@ class PolicyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     p["validate_workflow"](changed)
 
+    def test_signing_policy(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        p["validate_workflow"](source)
+        for changed in (source.replace(" && github.ref_protected", ""),
+                        source.replace("github.event_name == 'push' && github.repository", "github.event_name == 'pull_request' && github.repository"),
+                        source.replace("needs: [check, verify_evidence]", "needs: [check]"),
+                        source.replace("attestations: write", "attestations: read"),
+                        source.replace("subject-path:", "subject-digest:"),
+                        source.replace("    outputs:\n", "    permissions:\n      id-token: write\n    outputs:\n")):
+            with self.assertRaises(ValueError):
+                p["validate_workflow"](changed)
+
     def test_reports(self):
         clean = {"version": 1, "parameters": "--vulnerable --include-transitive", "sources": [source], "projects": [
             {"path": "rpf9dump.csproj", "frameworks": []}]}
