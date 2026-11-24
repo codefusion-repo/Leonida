@@ -31,14 +31,32 @@ def _symbols():
     return env
 
 
+def _parse_mask(expression, symbols):
+    """Parse a zero or a caret-separated sequence of known bit symbols."""
+    if len(expression) > 1024:
+        raise ValueError("swizzle mask expression too long")
+    result = 0
+    for term in expression.split("^"):
+        term = term.strip()
+        if term == "0":
+            continue
+        if term not in symbols:
+            raise ValueError("invalid swizzle mask term")
+        result ^= symbols[term]
+    return result
+
+
 def load(path=HEADER):
-    text = open(path, encoding="utf-8", errors="replace").read()
+    with open(path, encoding="utf-8", errors="strict") as header:
+        text = header.read()
     env = _symbols()
     nibbles = {}
     for name in ("NIBBLE01", "NIBBLE2", "NIBBLE3", "NIBBLE4"):
         m = re.search(r"GFX10_SW_PATTERN_" + name + r"\[\]\[\d+\]\s*=\s*\{(.*?)\n\};", text, re.S)
+        if m is None:
+            raise ValueError(f"missing swizzle table: {name}")
         rows = re.findall(r"\{([^{}]*)\}", m.group(1))
-        nibbles[name] = [[eval(t.strip() or "0", {}, env) for t in r.split(",") if t.strip()] for r in rows]  # noqa: S307
+        nibbles[name] = [[_parse_mask(t, env) for t in r.split(",") if t.strip()] for r in rows]
     tables = {}
     for m in re.finditer(r"const ADDR_SW_PATINFO (GFX10_SW_\w+_PATINFO)\[\]\s*=\s*\{(.*?)\n\};", text, re.S):
         entries = []
