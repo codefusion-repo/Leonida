@@ -30,16 +30,18 @@ class PolicyTests(unittest.TestCase):
                             text.replace("persist-credentials: false", "persist-credentials: true"),
                             text.replace("submodules: false", "submodules: recursive"),
                             text.replace(p["ACTIONS"]["actions/checkout"], "v4"),
+                            text.replace("    env:\n", "    env:\n      BAD: ${{ runner.temp }}\n"),
+                            text.replace("          submodules: false", "          submodules: false\n          token: unsafe"),
                             text + "\n    permissions: write-all\n",
                             text + "\n    - uses: other/action@" + "0" * 40 + "\n"):
                 with self.assertRaises(ValueError):
                     p["validate_workflow"](changed)
 
     def test_reports(self):
-        clean = {"version": 1, "sources": [source], "projects": [
+        clean = {"version": 1, "parameters": "--vulnerable --include-transitive", "sources": [source], "projects": [
             {"path": "rpf9dump.csproj", "frameworks": []}]}
         p["validate_report"](clean, "rpf9dump.csproj")
-        for key in ("version", "sources", "projects"):
+        for key in ("version", "sources", "projects", "parameters"):
             bad = copy.deepcopy(clean)
             del bad[key]
             with self.assertRaises(ValueError):
@@ -55,10 +57,25 @@ class PolicyTests(unittest.TestCase):
         target = {"RpfPreview.Core/1.0.0": {"type": "project", "dependencies": {"BCnEncoder.Net": "2.3.0"}},
                   "BCnEncoder.Net/2.3.0": {"type": "package", "dependencies": {"Synthetic": "1.0.0"}},
                   "Synthetic/1.0.0": {"type": "package"}}
-        assets = {"targets": {"net8.0": target},
+        assets = {"version": 3, "targets": {"net8.0": target},
                   "libraries": {k: {"type": v["type"], "sha512": digest} for k, v in target.items()},
                   "project": {"restore": {"sources": {source: {}}}, "frameworks": {"net8.0": {}}}}
         bom = p["sbom"](assets, "1" * 40)
+        lock = {"version": 1, "dependencies": {"net8.0": {
+            "RpfPreview.Core": {"type": "Project", "dependencies": {"BCnEncoder.Net": "2.3.0"}},
+            "BCnEncoder.Net": {"type": "Transitive", "resolved": "2.3.0", "contentHash": digest,
+                              "dependencies": {"Synthetic": "1.0.0"}},
+            "Synthetic": {"type": "Transitive", "resolved": "1.0.0", "contentHash": digest}}}}
+        p["validate_lock"](lock, assets)
+        for field, value in (("contentHash", "bad"), ("resolved", "2.4.0"), ("dependencies", {})):
+            altered = copy.deepcopy(lock)
+            altered["dependencies"]["net8.0"]["BCnEncoder.Net"][field] = value
+            with self.assertRaises(ValueError):
+                p["validate_lock"](altered, assets)
+        altered = copy.deepcopy(lock)
+        del altered["dependencies"]["net8.0"]["Synthetic"]
+        with self.assertRaises(ValueError):
+            p["validate_lock"](altered, assets)
         self.assertEqual(len(bom["components"]), 3)
         self.assertEqual(len(bom["dependencies"]), 4)
         self.assertIn("pkg:nuget/synthetic@1.0.0", [c.get("purl") for c in bom["components"]])

@@ -3,6 +3,7 @@ import argparse
 import base64
 import datetime
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,9 @@ SUB_SHA = "48557ead00601d3757ba12b894f2595c4faad2a5"
 SOURCE = "https://api.nuget.org/v3/index.json"
 PROJECT = "tools/rpf9dump/rpf9dump.csproj"
 CORE = SUB + "/Core/RpfPreview.Core.csproj"
+LOCKS = {"rpf9dump.lock.json": "tools/rpf9dump/packages.lock.json",
+         "rpf9-core.lock.json": SUB + "/Core/packages.lock.json"}
+LOCK_DIR = ROOT / "dependency-locks"
 MANIFEST = '[submodule "' + SUB + '"]\n\tpath = ' + SUB + '\n\turl = ' + SUB_URL + '\n'
 ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -63,8 +67,11 @@ def verify_submodule_checkout():
             "submodule checkout mismatch")
     require(run("git", "config", "--local", "--get", "remote.origin.url",
                 cwd=ROOT / SUB).strip() == SUB_URL, "submodule remote mismatch")
-    require(not run("git", "status", "--porcelain", "--untracked-files=no", cwd=ROOT / SUB),
+    require(not run("git", "diff", "--name-only", "HEAD", cwd=ROOT / SUB),
             "modified submodule source")
+    require(not any(line.startswith("160000 ") for line in
+                    run("git", "ls-tree", "-rz", "HEAD", cwd=ROOT / SUB).split("\0")),
+            "nested submodule not authorized")
 
 
 def validate_workflow(source):
@@ -82,16 +89,25 @@ def validate_workflow(source):
     require(len(re.findall(r"(?m)^\s*(?:-\s*)?uses\s*:", source)) == len(uses),
             "unrecognized action syntax")
     count = source.count("uses: actions/checkout@")
-    require(count and count == source.count("persist-credentials: false")
-            == source.count("submodules: false"), "unsafe checkout settings")
+    checkout = re.escape(ACTIONS["actions/checkout"])
+    exact = r"(?m)^      - uses: actions/checkout@" + checkout + r"\n        with:\n          ref: \$\{\{ env\.CANDIDATE_SHA \}\}\n          persist-credentials: false\n          submodules: false\n(?=      -|$)"
+    require(count and count == len(re.findall(exact, source)), "unsafe checkout settings")
+    require(count == source.count("persist-credentials: false") == source.count("submodules: false"),
+            "ambiguous checkout settings")
+    require(not re.search(r"(?m)^    env:\n(?:(?:      [^\n]+)\n)*?      [^\n]*\$\{\{\s*runner\.", source),
+            "runner context unavailable in job env")
+    require(not re.search(r"(?m)^\s*(?:continue-on-error|secrets|container|services)\s*:", source),
+            "unreviewed job execution policy")
 
 
 def validate_config(path):
     root = ET.parse(path).getroot()
-    require(root.tag == "configuration" and len(root) == 1, "unexpected NuGet config")
+    require(root.tag == "configuration" and not root.attrib and len(root) == 1,
+            "unexpected NuGet config")
     sources = root[0]
     require(sources.tag == "packageSources" and len(sources) == 2
-            and sources[0].tag == "clear" and sources[1].tag == "add"
+            and not sources.attrib and sources[0].tag == "clear" and not sources[0].attrib
+            and not len(sources[0]) and sources[1].tag == "add" and not len(sources[1])
             and sources[1].attrib == {"key": "nuget.org", "value": SOURCE},
             "unreviewed NuGet source")
 
@@ -103,6 +119,10 @@ def prepare(sha):
         validate_workflow(path.read_text(encoding="utf-8"))
     validate_config(ROOT / "NuGet.Config")
     verify_submodule_input()
+    config = subprocess.run(["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+                            cwd=ROOT, capture_output=True, timeout=30)
+    require(config.returncode == 1, "Git URL rewrite configured or config query failed")
+    require(not (ROOT / SUB / ".git").exists(), "submodule must start uninitialized")
     subprocess.run(["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
                     "-c", f"submodule.{SUB}.url={SUB_URL}", "submodule", "update",
                     "--init", "--checkout", "--depth", "1", "--", SUB],
@@ -120,6 +140,9 @@ def validate_report(report, project_name):
     require(str(projects[0].get("path", "")).replace("\\", "/").split("/")[-1] == project_name,
             "wrong audit project")
     require(isinstance(projects[0].get("frameworks"), list), "missing framework report")
+    parameters = report.get("parameters", "")
+    require(isinstance(parameters, str) and "vulnerable" in parameters and
+            "include-transitive" in parameters, "wrong advisory query mode")
 
     def walk(node):
         if isinstance(node, dict):
@@ -135,6 +158,8 @@ def validate_report(report, project_name):
 
 
 def sbom(assets, sha):
+    require(assets.get("version") == 3, "unexpected assets format")
+    require(not assets.get("logs"), "restore graph contains diagnostic findings")
     require(set(assets["targets"]) == {"net8.0"}, "unexpected restore target")
     target = assets["targets"]["net8.0"]
     libraries = assets["libraries"]
@@ -168,6 +193,8 @@ def sbom(assets, sha):
         components.append(component)
         edges[ref] = node.get("dependencies", {})
     require(len(root_deps) == 1 and "bcnencoder.net" in refs, "expected dependencies missing")
+    require("BCnEncoder.Net/2.3.0" in target and target["BCnEncoder.Net/2.3.0"]["type"] == "package",
+            "unexpected direct package resolution")
     framework = assets["project"]["frameworks"]["net8.0"]
     root_deps += [refs[name.lower()] for name in framework.get("dependencies", {})]
     deps = {ref: sorted({refs[name.lower()] for name in names}) for ref, names in edges.items()}
@@ -191,55 +218,152 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def validate_lock(lock, assets):
+    require(lock.get("version") in (1, 2), "unsupported lock format")
+    require(set(lock["dependencies"]) == {"net8.0"}, "unexpected lock framework")
+    entries = lock["dependencies"]["net8.0"]
+    graph = assets["targets"]["net8.0"]
+    by_name = {key.split("/")[0].lower(): (key, node) for key, node in graph.items()}
+    packages = {name for name, (_, node) in by_name.items() if node["type"] == "package"}
+    seen = set()
+    for name, item in entries.items():
+        key, node = by_name[name.lower()]
+        if node["type"] == "project":
+            require(item["type"] == "Project", "project lock mismatch")
+        else:
+            require(item["type"] in ("Direct", "Transitive") and
+                    item["resolved"] == key.split("/")[1] and
+                    item["contentHash"] == assets["libraries"][key]["sha512"],
+                    "package lock mismatch")
+            seen.add(name.lower())
+        require({k.lower(): v for k, v in item.get("dependencies", {}).items()} ==
+                {k.lower(): v for k, v in node.get("dependencies", {}).items()},
+                "lock dependency edges differ")
+    require(seen == packages, "lock omits resolved packages")
+
+
+def read_assets(project):
+    return json.loads((ROOT / Path(project).parent / "obj/project.assets.json").read_text(encoding="utf-8"))
+
+
+def read_locks():
+    return {name: json.loads((ROOT / path).read_text(encoding="utf-8-sig")) for name, path in LOCKS.items()}
+
+
+def committed_locks():
+    present = [(LOCK_DIR / name).is_file() for name in LOCKS]
+    require(all(present) or not any(present), "partial reviewed lock set")
+    if not any(present):
+        return None
+    values = {}
+    for name in LOCKS:
+        path = "dependency-locks/" + name
+        text = run("git", "show", "HEAD:" + path)
+        value = json.loads(text)
+        require(value == json.loads((ROOT / path).read_text(encoding="utf-8")),
+                "reviewed lock differs from candidate")
+        values[name] = value
+    return values
+
+
+def restore(locked):
+    command = ["dotnet", "restore", PROJECT, "--configfile", "NuGet.Config",
+               "--force", "--no-cache", "--use-lock-file", "-p:NuGetAudit=true",
+               "-p:NuGetAuditMode=all", "-p:NuGetAuditLevel=low", "-p:TreatWarningsAsErrors=true",
+               "-p:NoWarn=", "-p:WarningsNotAsErrors=", "-p:NuGetAuditSuppress=",
+               "-p:RestoreIgnoreFailedSources=false"]
+    if locked:
+        command.append("--locked-mode")
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                            encoding="utf-8", timeout=300)
+    print(result.stdout, result.stderr, flush=True)
+    require(result.returncode == 0 and not re.search(r"\bNU190[0-5]\b", result.stdout + result.stderr),
+            "NuGet restore/audit failed")
+
+
 def audit(sha, output):
     candidate(sha)
     verify_submodule_input()
     verify_submodule_checkout()
     validate_config(ROOT / "NuGet.Config")
-    for name in ("NUGET_PACKAGES", "NUGET_HTTP_CACHE_PATH"):
+    caches = ("NUGET_PACKAGES", "NUGET_HTTP_CACHE_PATH")
+    for name in caches:
         require(os.environ.get(name), "isolated NuGet cache required")
         require(not Path(os.environ[name]).exists(), "NuGet cache must start empty")
     version = run("dotnet", "--version").strip()
-    require(re.fullmatch(r"8\.0\.\d+", version), "unexpected SDK")
+    require(re.fullmatch(r"8\.0\.4\d\d", version), "unexpected SDK")
     print("Audit SDK:", version, flush=True)
-    command = ["dotnet", "restore", PROJECT, "--configfile", "NuGet.Config",
-               "--force", "--no-cache", "-p:NuGetAudit=true", "-p:NuGetAuditMode=all",
-               "-p:NuGetAuditLevel=low", "-p:TreatWarningsAsErrors=true", "-p:NoWarn=",
-               "-p:WarningsNotAsErrors=", "-p:RestoreIgnoreFailedSources=false"]
-    restored = subprocess.run(command, cwd=ROOT, capture_output=True,
-                              encoding="utf-8", timeout=300)
-    print(restored.stdout, restored.stderr, flush=True)
-    require(restored.returncode == 0 and not re.search(r"\bNU190[0-5]\b", restored.stdout + restored.stderr),
-            "NuGet restore/audit failed")
+    reviewed = committed_locks()
+    if reviewed:
+        for name, path in LOCKS.items():
+            write_json(ROOT / path, reviewed[name])
+    restore(locked=reviewed is not None)
+    generated = read_locks()
+    for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
+        validate_lock(generated[name], read_assets(project))
+    if reviewed:
+        require(reviewed == generated, "reviewed lock changed")
+    first = sbom(read_assets(PROJECT), sha)
+    # Re-resolve against the lock with fresh caches. Do not let first restore
+    # contents mask a missing or substituted package.
+    for name in caches:
+        os.environ[name] += "-locked"
+        require(not Path(os.environ[name]).exists(), "locked cache must start empty")
+    restore(locked=True)
+    require(generated == read_locks(), "locked restore modified lockfiles")
+    for name, project in (("rpf9dump.lock.json", PROJECT), ("rpf9-core.lock.json", CORE)):
+        validate_lock(generated[name], read_assets(project))
+    bom = sbom(read_assets(PROJECT), sha)
+    require(first["components"] == bom["components"] and first["dependencies"] == bom["dependencies"],
+            "locked restore changed resolved graph")
     for project in (PROJECT, CORE):
         result = subprocess.run(["dotnet", "list", project, "package", "--vulnerable",
-                                 "--include-transitive", "--format", "json", "--output-version", "1"],
+                                 "--include-transitive", "--config", "NuGet.Config",
+                                 "--format", "json", "--output-version", "1"],
                                 cwd=ROOT, capture_output=True, encoding="utf-8", timeout=180)
         require(result.returncode == 0 and not result.stderr.strip(), "NuGet advisory query failed")
-        report = json.loads(result.stdout)
-        validate_report(report, Path(project).name)
-    data = json.loads((ROOT / "tools/rpf9dump/obj/project.assets.json").read_text(encoding="utf-8"))
-    bom = sbom(data, sha)
+        validate_report(json.loads(result.stdout), Path(project).name)
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "rpf9dump.cdx.json", bom)
+    for name, value in generated.items():
+        path = output / name
+        write_json(path, value)
+        # These are public package identities/hashes, not arbitrary file logs.
+        print("LOCKFILE", name, hashlib.sha256(path.read_bytes()).hexdigest(),
+              base64.b64encode(path.read_bytes()).decode("ascii"), flush=True)
     packages = [{"name": c["name"], "version": c["version"]} for c in bom["components"] if "purl" in c]
     write_json(output / "audit.json", {"candidate": sha, "submodule": SUB_SHA, "sdk": version,
                                      "source": SOURCE, "mode": "all", "level": "low",
-                                     "restoreExitCode": restored.returncode, "advisoryReports": "passed",
-                                     "packages": packages, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
-    print("NuGet audit PASS: direct and transitive reports; resolved CycloneDX components:")
+                                     "lockedRestore": "passed", "reviewedLocks": reviewed is not None,
+                                     "advisoryReports": "passed", "packages": packages,
+                                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+    # Carry the second restore's cache path into the subsequent --no-restore build.
+    if os.environ.get("GITHUB_ENV"):
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+            for name in caches:
+                env.write(name + "=" + os.environ[name] + "\n")
+    print("NuGet audit PASS: direct/transitive reports, locked restore, resolved CycloneDX components:")
     for package in packages:
         print(package["name"], package["version"])
 
 
+def require_locks(sha):
+    candidate(sha)
+    reviewed = committed_locks()
+    require(reviewed is not None, "BLOCKED: generated lockfiles require review and versioned publication")
+    require(reviewed == read_locks(), "working locks differ from reviewed locks")
+    print("Reviewed lockfiles PASS")
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("prepare", "audit"))
+    parser.add_argument("mode", choices=("prepare", "audit", "require-locks"))
     parser.add_argument("--sha", required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.sha)
+    elif args.mode == "require-locks":
+        require_locks(args.sha)
     else:
         require(args.output is not None, "audit output required")
         audit(args.sha, args.output)
